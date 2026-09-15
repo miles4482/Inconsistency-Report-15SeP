@@ -27,6 +27,7 @@ if str(SCRIPT_DIR) not in sys.path:
     sys.path.insert(0, str(SCRIPT_DIR))
 
 import compare_reference_parameters as audit  # noqa: E402
+import license_control as license_mod  # noqa: E402
 
 
 def open_path(path: Path):
@@ -85,16 +86,126 @@ def launch_gui():
     defaults = ensure_default_folders()
     root = tk.Tk()
     root.title("Parameter Inconsistency Audit")
-    root.geometry("920x720")
-    root.minsize(820, 640)
+    root.geometry("920x820")
+    root.minsize(820, 700)
 
     input_var = tk.StringVar(value=str(defaults["input"]))
     reference_var = tk.StringVar(value=str(defaults["reference"]))
     output_var = tk.StringVar(value=str(defaults["output"]))
+    license_var = tk.StringVar(value="Checking license…")
+    issued_to_var = tk.StringVar(value="licensed user")
+    days_var = tk.StringVar(value=str(license_mod.DEFAULT_LICENSE_DAYS))
+    until_var = tk.StringVar(value="")
     status_var = tk.StringVar(
         value="Select Input Folder, Reference Folder, and Output Folder on this PC. Files are not uploaded."
     )
     last_report = {"path": None}
+    license_state = {"info": license_mod.license_status(), "path": None}
+
+    def current_license_path() -> Path | None:
+        info = license_state["info"]
+        if info and info.path:
+            return Path(info.path)
+        found = license_mod.find_license_path()
+        return found
+
+    def apply_license_ui():
+        info = license_state["info"]
+        license_var.set(info.message)
+        if info.active:
+            license_label.config(fg="#1B5E20", bg="#E8F5E9")
+            generate_btn.config(state=tk.NORMAL)
+        else:
+            license_label.config(fg="#B71C1C", bg="#FFEBEE")
+            generate_btn.config(state=tk.DISABLED)
+        if info.active and info.issued_to:
+            issued_to_var.set(info.issued_to)
+
+    def load_license_file(path: Path | None = None):
+        if path is None:
+            chosen = filedialog.askopenfilename(
+                title="Select ParameterAudit.lic",
+                filetypes=[("License files", "*.lic *.json"), ("All files", "*.*")],
+            )
+            if not chosen:
+                return
+            path = Path(chosen)
+        dest = app_root() / "ParameterAudit.lic"
+        try:
+            info = license_mod.verify_license_file(path)
+            if path.resolve() != dest.resolve():
+                dest.write_text(path.read_text(encoding="utf-8"), encoding="utf-8")
+            license_state["info"] = info
+            license_state["path"] = dest if dest.is_file() else path
+            apply_license_ui()
+            messagebox.showinfo("License loaded", license_state["info"].message)
+        except Exception as exc:
+            license_state["info"] = license_mod.license_status(path)
+            apply_license_ui()
+            messagebox.showerror("License not valid", str(exc)[:1500])
+
+    def refresh_license():
+        license_state["info"] = license_mod.license_status(current_license_path())
+        apply_license_ui()
+
+    def issue_new_license():
+        try:
+            days = int(days_var.get() or license_mod.DEFAULT_LICENSE_DAYS)
+            until = until_var.get().strip()
+            payload = license_mod.issue_license(
+                issued_to=issued_to_var.get(),
+                days=days,
+                expires_at=license_mod._parse_until(until) if until else None,
+            )
+            dest = Path(
+                filedialog.asksaveasfilename(
+                    title="Save new license",
+                    defaultextension=".lic",
+                    initialfile="ParameterAudit.lic",
+                    filetypes=[("License files", "*.lic"), ("All files", "*.*")],
+                )
+                or ""
+            )
+            if not dest:
+                return
+            license_mod.write_license(payload, dest)
+            app_copy = app_root() / "ParameterAudit.lic"
+            if dest.resolve() != app_copy.resolve():
+                license_mod.write_license(payload, app_copy)
+            license_state["info"] = license_mod.verify_license_file(dest)
+            apply_license_ui()
+            messagebox.showinfo(
+                "License issued",
+                f"Saved {dest}\nIssued to {payload['issued_to']}\nExpires {payload['expires_at']}",
+            )
+        except Exception as exc:
+            messagebox.showerror("Could not issue license", str(exc)[:1500])
+
+    def extend_current_license():
+        path = current_license_path()
+        if path is None:
+            messagebox.showerror("No license", "Load or issue a license first, then extend it.")
+            return
+        try:
+            days = int(days_var.get() or license_mod.DEFAULT_LICENSE_DAYS)
+            until = until_var.get().strip()
+            payload = license_mod.extend_license(
+                path,
+                days=days,
+                until=license_mod._parse_until(until) if until else None,
+            )
+            dest = path
+            license_mod.write_license(payload, dest)
+            app_copy = app_root() / "ParameterAudit.lic"
+            license_mod.write_license(payload, app_copy)
+            license_state["info"] = license_mod.verify_license_file(app_copy)
+            apply_license_ui()
+            messagebox.showinfo(
+                "License extended",
+                f"Updated {app_copy}\nIssued to {payload['issued_to']}\nNew expiry {payload['expires_at']}",
+            )
+        except Exception as exc:
+            messagebox.showerror("Could not extend license", str(exc)[:1500])
 
     def folder_listing(folder_text: str) -> list[Path]:
         folder = Path(folder_text).expanduser()
@@ -135,6 +246,14 @@ def launch_gui():
             btn.config(state=state)
 
     def generate():
+        refresh_license()
+        if not license_state["info"].active:
+            messagebox.showerror(
+                "License required",
+                license_state["info"].message
+                + "\n\nThis software cannot run without an active license.",
+            )
+            return
         inputs, refs = refresh_lists()
         if len(inputs) < 1:
             messagebox.showerror(
@@ -180,6 +299,7 @@ def launch_gui():
                     input_folder=Path(input_var.get()),
                     reference_folder=Path(reference_var.get()),
                     progress=progress,
+                    license_file=current_license_path(),
                 )
                 messages.put(("done", run, summary))
             except Exception as exc:
@@ -194,6 +314,7 @@ def launch_gui():
                         log_box.see(tk.END)
                     elif item[0] == "error":
                         set_buttons(tk.NORMAL)
+                        apply_license_ui()
                         status_var.set("Audit failed.")
                         messagebox.showerror("Audit failed", item[1][:1500])
                         return
@@ -201,6 +322,7 @@ def launch_gui():
                         run, summary = item[1], item[2]
                         last_report["path"] = run.out_xlsx
                         set_buttons(tk.NORMAL)
+                        apply_license_ui()
                         open_btn.config(state=tk.NORMAL)
                         all_c = summary["ALL"]
                         status_var.set(
@@ -242,6 +364,49 @@ def launch_gui():
         bg="#1F4E79",
         font=("Segoe UI", 10),
     ).pack(anchor="w", padx=16, pady=(0, 12))
+
+    lic_frame = tk.Frame(root, bg="#FFEBEE", padx=16, pady=8)
+    lic_frame.pack(fill=tk.X)
+    license_label = tk.Label(
+        lic_frame,
+        textvariable=license_var,
+        anchor="w",
+        justify="left",
+        wraplength=700,
+        bg="#FFEBEE",
+        fg="#B71C1C",
+        font=("Segoe UI", 10, "bold"),
+    )
+    license_label.pack(side=tk.LEFT, fill=tk.X, expand=True)
+    tk.Button(lic_frame, text="Load license…", command=lambda: load_license_file(), width=14).pack(
+        side=tk.RIGHT, padx=(8, 0)
+    )
+    tk.Button(lic_frame, text="Refresh", command=refresh_license, width=10).pack(side=tk.RIGHT)
+
+    if license_mod.find_private_key_path():
+        admin = tk.LabelFrame(root, text="License Admin (owner — private key detected)", padx=12, pady=8)
+        admin.pack(fill=tk.X, padx=16, pady=(8, 0))
+        row = tk.Frame(admin)
+        row.pack(fill=tk.X)
+        tk.Label(row, text="Issued to:").pack(side=tk.LEFT)
+        tk.Entry(row, textvariable=issued_to_var, width=24).pack(side=tk.LEFT, padx=(4, 12))
+        tk.Label(row, text="Days (default 7):").pack(side=tk.LEFT)
+        tk.Entry(row, textvariable=days_var, width=6).pack(side=tk.LEFT, padx=(4, 12))
+        tk.Label(row, text="Or until YYYY-MM-DD:").pack(side=tk.LEFT)
+        tk.Entry(row, textvariable=until_var, width=12).pack(side=tk.LEFT, padx=(4, 12))
+        tk.Button(row, text="Issue new license…", command=issue_new_license, width=18).pack(side=tk.LEFT)
+        tk.Button(row, text="Extend current license", command=extend_current_license, width=20).pack(
+            side=tk.LEFT, padx=8
+        )
+        tk.Label(
+            admin,
+            text="Issue a 7-day license for a user, or extend the loaded license by more days / to a date. "
+            "Send them the .lic file. Keep the private key secret.",
+            anchor="w",
+            justify="left",
+            wraplength=860,
+            fg="#333",
+        ).pack(fill=tk.X, pady=(6, 0))
 
     body = tk.Frame(root, padx=16, pady=12)
     body.pack(fill=tk.BOTH, expand=True)
@@ -327,6 +492,7 @@ def launch_gui():
     log_box.pack(fill=tk.BOTH, expand=True)
 
     refresh_lists()
+    refresh_license()
     root.mainloop()
 
 

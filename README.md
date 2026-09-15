@@ -10,6 +10,21 @@ One tool, three local folders on your PC:
 
 Files stay on this PC. There is no upload and no file-size limit from the app.
 
+## License (required)
+
+The app will not run without an active signed license. Default validity is **7 days**. Place `ParameterAudit.lic` next to the exe (or load it in the GUI).
+
+Owner (you) — keep `parameter_audit_private.key` private (not in git). Issue or extend at any time:
+
+```bash
+python3 scripts/issue_license.py --to "Site A" --days 7 -o SiteA.lic
+python3 scripts/issue_license.py --extend SiteA.lic --days 7
+python3 scripts/issue_license.py --extend SiteA.lic --until 2026-12-31
+python3 scripts/issue_license.py --status
+```
+
+If the private key is next to `ParameterAudit.exe`, the app shows **License Admin** so you can issue and extend from the GUI.
+
 ## Windows app
 
 Download [`packages/ParameterAudit_Windows.rar`](packages/ParameterAudit_Windows.rar), extract the folder, then run `ParameterAudit.exe`.

@@ -32,6 +32,8 @@ from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
 from openpyxl.utils import get_column_letter
 from pyxlsb import open_workbook
 
+import license_control as license_mod
+
 
 WORKBOOK_SUFFIXES = {".xlsx", ".xlsb", ".xlsm"}
 
@@ -2009,6 +2011,8 @@ def parse_args(argv=None):
     parser.add_argument("--config-4g", type=Path, help="Single 4G dump (legacy)")
     parser.add_argument("--config-5g", type=Path, help="Single 5G dump (legacy)")
     parser.add_argument("--run-id", help="Optional run id; default is timestamp YYYYMMDD_HHMMSS")
+    parser.add_argument("--license", type=Path, help="ParameterAudit.lic file (default: next to the app)")
+    parser.add_argument("--license-status", action="store_true", help="Print license status and exit")
     parser.add_argument("--list-inputs", action="store_true", help="Show detected input files and exit")
     parser.add_argument("--gui", action="store_true", help="Open the graphical tool")
     parser.add_argument(
@@ -2036,7 +2040,10 @@ def execute_folder_audit(
     reference_files=None,
     run_id=None,
     progress=print,
+    license_file=None,
 ):
+    license_info = license_mod.require_active_license(license_file)
+    progress(f"License: {license_info.message}")
     input_files = [Path(p).expanduser().resolve() for p in (input_files or [])]
     reference_files = [Path(p).expanduser().resolve() for p in (reference_files or [])]
     if not input_files:
@@ -2128,6 +2135,21 @@ def execute_audit(reference: Path, cfg_4g: Path, cfg_5g: Path, output_dir: Path,
 
 def main(argv=None):
     args = parse_args(argv)
+    if args.license_status:
+        info = license_mod.license_status(args.license)
+        print(info.message)
+        if info.path:
+            print(f"File: {info.path}")
+        if info.active:
+            print(f"Expires: {info.expires_at.isoformat()}")
+        return 0 if info.active else 3
+    try:
+        license_mod.require_active_license(args.license)
+    except license_mod.LicenseError as exc:
+        print(exc, file=sys.stderr)
+        print("Place ParameterAudit.lic next to the app, or pass --license. Ask the issuer to extend an expired license.", file=sys.stderr)
+        return 3
+
     cfg = load_audit_config(args.config)
     input_folder = args.input_folder or DEFAULT_INPUT_DIR
     reference_folder = args.reference_folder or DEFAULT_REFERENCE_DIR
@@ -2167,6 +2189,7 @@ def main(argv=None):
                 input_folder=input_folder,
                 reference_folder=reference_folder,
                 run_id=args.run_id,
+                license_file=args.license,
             )
         else:
             extra_inputs = []
@@ -2198,8 +2221,9 @@ def main(argv=None):
                 input_files=extra_inputs,
                 reference_files=extra_refs,
                 run_id=args.run_id,
+                license_file=args.license,
             )
-    except (FileNotFoundError, ValueError) as exc:
+    except (FileNotFoundError, ValueError, license_mod.LicenseError) as exc:
         print(exc, file=sys.stderr)
         return 2
 

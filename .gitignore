@@ -13,3 +13,6 @@ reference/*.xlsm
 !reference/README.md
 build/
 dist/
+secrets/*.key
+secrets/*.pem
+*.lic
