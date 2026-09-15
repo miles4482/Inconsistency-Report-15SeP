@@ -63,7 +63,8 @@ Microsoft Excel allows **1,048,576 rows** and **16,384 columns** per sheet. This
 
 ## Sample result (15 Sep 2026 dumps)
 
-- `reports/Parameter_Inconsistency_Report_15Sep26.xlsx` ([download](https://github.com/miles4482/Inconsistency-Report-15SeP/raw/cursor/parameter-inconsistency-report-0dac/reports/Parameter_Inconsistency_Report_15Sep26.xlsx))
-- `reports/Parameter_Inconsistency_Report_15Sep26.md` ([download](https://github.com/miles4482/Inconsistency-Report-15SeP/raw/cursor/parameter-inconsistency-report-0dac/reports/Parameter_Inconsistency_Report_15Sep26.md))
+- [`reports/Parameter_Inconsistency_Report_15Sep26.xlsx`](reports/Parameter_Inconsistency_Report_15Sep26.xlsx)
+- [`reports/Parameter_Inconsistency_Report_15Sep26.md`](reports/Parameter_Inconsistency_Report_15Sep26.md)
+- [`reports/all_parameters_15Sep26.csv`](reports/all_parameters_15Sep26.csv)
 
 Headline from the three-folder run on the 15 Sep 2026 dumps: **256** parameters, **79** inconsistent (5 full, 74 mixed), **85** consistent, **92** no recommend, **0** not found. Auditable rate **48.2%**.
