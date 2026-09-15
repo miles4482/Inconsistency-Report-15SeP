@@ -16,3 +16,4 @@ dist/
 secrets/*.key
 secrets/*.pem
 *.lic
+!packages/licenses/**
