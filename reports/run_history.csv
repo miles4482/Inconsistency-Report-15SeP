@@ -1,2 +1,2 @@
-run_id,audit_date,reference,config_4g,config_5g,total,inconsistent,full_inconsistent,mixed,consistent,not_found,no_recommend,auditable_rate,nr_performance_inconsistent,nr_anchor_inconsistent,report_xlsx
-20260915_toolcheck,15 Sep 2026,Reference Parameter_v1.0.xlsx,4G_ConfigurationData_15Sep26.xlsb,5G_ConfigurationData_15Sep26.xlsb,256,79,5,74,85,0,92,48.2%,55,24,reports/runs/20260915_toolcheck/Parameter_Inconsistency_Report.xlsx
+run_id,audit_date,reference_files,input_files,total,inconsistent,full_inconsistent,mixed,consistent,not_found,no_recommend,auditable_rate,report_xlsx
+15Sep26_folders,15 Sep 2026,Reference Parameter_v1.0.xlsx,4G_ConfigurationData_15Sep26.xlsb; 5G_ConfigurationData_15Sep26.xlsb,256,79,5,74,85,0,92,48.2%,reports/runs/15Sep26_folders/Parameter_Inconsistency_Report.xlsx

@@ -1,0 +1,48 @@
+{
+  "run_id": "15Sep26_folders",
+  "audit_date": "15 Sep 2026",
+  "input_folder": "input",
+  "reference_folder": "reference",
+  "output_folder": "reports",
+  "reference_files": [
+    "reference/Reference Parameter_v1.0.xlsx"
+  ],
+  "input_files": [
+    "input/4G_ConfigurationData_15Sep26.xlsb",
+    "input/5G_ConfigurationData_15Sep26.xlsb"
+  ],
+  "parameter_count": 256,
+  "overall": {
+    "mixed": 74,
+    "total": 256,
+    "inconsistent": 79,
+    "consistent": 85,
+    "no_recommend": 92,
+    "full_inconsistent": 5
+  },
+  "sheets": {
+    "NR Performance": {
+      "mixed": 53,
+      "total": 182,
+      "inconsistent": 55,
+      "consistent": 41,
+      "no_recommend": 86,
+      "full_inconsistent": 2
+    },
+    "NR Anchor": {
+      "no_recommend": 6,
+      "total": 74,
+      "mixed": 21,
+      "inconsistent": 24,
+      "consistent": 44,
+      "full_inconsistent": 3
+    }
+  },
+  "auditable_inconsistency_rate": "48.2%",
+  "excel_limits_note": "1048576 rows x 16384 columns per sheet (Microsoft Excel). No extra cap in this tool.",
+  "outputs": {
+    "xlsx": "reports/runs/15Sep26_folders/Parameter_Inconsistency_Report.xlsx",
+    "md": "reports/runs/15Sep26_folders/Parameter_Inconsistency_Report.md",
+    "csv": "reports/runs/15Sep26_folders/all_parameters.csv"
+  }
+}
