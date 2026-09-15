@@ -6,7 +6,6 @@ call "%~dp0.venv\Scripts\activate.bat"
 python -m pip install -r "%~dp0requirements.txt" pyinstaller
 python -m PyInstaller --noconfirm --clean "%~dp0ParameterAudit.spec"
 echo.
-echo Built: %~dp0dist\ParameterAudit.exe
-echo Double-click dist\ParameterAudit.exe then select several input files.
+echo Built folder: %~dp0dist\ParameterAudit\
+echo Run: %~dp0dist\ParameterAudit\ParameterAudit.exe
 pause
-

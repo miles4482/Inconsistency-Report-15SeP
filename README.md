@@ -1,48 +1,33 @@
 # Parameter Inconsistency Audit
 
-One tool: **select several input files → get the inconsistency report**.
+One tool: **select files or a folder on your PC → save the report to a folder on your PC**.
+Input and output stay local. There is no upload and no file-size limit.
 
-## EXE / desktop tool
+## Windows app
 
-1. Build once:
+Download `packages/ParameterAudit_Windows.rar`, extract the folder, then run `ParameterAudit.exe`.
 
-Windows:
+In the app:
+
+1. **Select files from this PC** or **Select input folder from this PC**
+   (Reference + 4G dump + 5G dump, any size, any drive).
+2. **Browse this PC** for the output folder (default: `Documents\ParameterAudit_Reports`).
+3. **Generate Report**.
+
+Windows Defender may still warn because the app is unsigned. Choose **More info → Run anyway**, or add the extracted folder as an exclusion. Use the extracted **folder** (not a single packed exe) — that is less often blocked.
+
+To rebuild locally:
+
 ```bat
 build_exe.bat
 ```
 
-Linux:
-```bash
-./build_exe.sh
-```
+Then run `dist\ParameterAudit\ParameterAudit.exe`.
 
-2. Run `dist/ParameterAudit.exe` (Windows) or `dist/ParameterAudit` (Linux).
-
-3. Click **Select input files…** and pick all of these together (any order):
-   - Reference Parameter workbook
-   - 4G configuration dump
-   - 5G configuration dump
-
-4. Click **Generate Report**. Output is written to the chosen folder (`reports/` by default):
-   - `Parameter_Inconsistency_Report.xlsx`
-   - `all_parameters.csv`
-   - `Parameter_Inconsistency_Report.md`
-
-Command line (same tool, several files then output folder):
+Command line (local files, local output):
 
 ```bash
-./dist/ParameterAudit \
-  "Reference Parameter_v1.0.xlsx" \
-  4G_ConfigurationData_15Sep26.xlsb \
-  5G_ConfigurationData_15Sep26.xlsb \
-  -o reports
-```
-
-Or without building an exe:
-
-```bash
-python3 scripts/parameter_audit_app.py
-python3 scripts/parameter_audit_app.py file1.xlsx file2.xlsb file3.xlsb -o reports
+python3 scripts/parameter_audit_app.py file1.xlsx file2.xlsb file3.xlsb -o "C:\Users\You\Documents\ParameterAudit_Reports"
 ```
 
 ## Folder drop (no GUI)

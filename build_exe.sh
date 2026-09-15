@@ -5,5 +5,4 @@ cd "$ROOT"
 python3 -m venv "$ROOT/.venv"
 "$ROOT/.venv/bin/pip" install -r "$ROOT/requirements.txt" pyinstaller
 "$ROOT/.venv/bin/python" -m PyInstaller --noconfirm --clean "$ROOT/ParameterAudit.spec"
-echo "Built: $ROOT/dist/ParameterAudit"
-
+echo "Built folder: $ROOT/dist/ParameterAudit"
