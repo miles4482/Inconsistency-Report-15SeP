@@ -1,0 +1,28 @@
+{
+  "description": "Defaults for the recurring 4G/5G parameter inconsistency audit",
+  "reference_sheet_network": {
+    "NR Performance": "5G",
+    "NR Anchor": "4G"
+  },
+  "input_dir": "input",
+  "output_dir": "reports",
+  "file_patterns": {
+    "reference": [
+      "Reference Parameter*.xlsx",
+      "Reference Parameter*.xlsb",
+      "*Reference*Parameter*.xlsx"
+    ],
+    "4G": [
+      "4G_ConfigurationData*.xlsb",
+      "4G_ConfigurationData*.xlsx",
+      "*4G*Config*.xlsb",
+      "*4G*Config*.xlsx"
+    ],
+    "5G": [
+      "5G_ConfigurationData*.xlsb",
+      "5G_ConfigurationData*.xlsx",
+      "*5G*Config*.xlsb",
+      "*5G*Config*.xlsx"
+    ]
+  }
+}
