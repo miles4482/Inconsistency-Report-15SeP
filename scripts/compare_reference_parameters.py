@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import argparse
 import csv
+import fnmatch
 import json
 import re
 import shutil
@@ -25,7 +26,14 @@ from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
 from openpyxl.utils import get_column_letter
 from pyxlsb import open_workbook
 
-ROOT = Path(__file__).resolve().parent.parent
+
+def runtime_root() -> Path:
+    if getattr(sys, "frozen", False):
+        return Path(sys.executable).resolve().parent
+    return Path(__file__).resolve().parent.parent
+
+
+ROOT = runtime_root()
 DEFAULT_INPUT_DIR = ROOT / "input"
 DEFAULT_OUTPUT_DIR = ROOT / "reports"
 DEFAULT_CONFIG = ROOT / "config" / "audit.json"
@@ -173,6 +181,55 @@ def discover_inputs(root: Path, input_dir: Path, config: dict | None = None) -> 
         "cfg_5g": newest_file(find_files(dirs, cfg_5g_patterns)),
         "search_dirs": dirs,
     }
+
+
+def _matches_any(name: str, patterns) -> bool:
+    return any(fnmatch.fnmatch(name, pat) for pat in patterns)
+
+
+def guess_file_role(path: Path) -> str:
+    name = path.name
+    upper = name.upper()
+    if _matches_any(name, REF_PATTERNS) or "REFERENCE" in upper:
+        return "reference"
+    if _matches_any(name, CFG_4G_PATTERNS) or re.search(r"(^|[^0-9])4G([^0-9]|$)", upper):
+        return "4g"
+    if _matches_any(name, CFG_5G_PATTERNS) or re.search(r"(^|[^0-9])5G([^0-9]|$)", upper):
+        return "5g"
+    try:
+        sheets = [str(s).upper() for s in sheet_names(path)]
+    except Exception:
+        return "unknown"
+    if any(s in {"NR PERFORMANCE", "NR ANCHOR", "TITLE"} for s in sheets) and "MAPPING DEF" not in sheets:
+        return "reference"
+    if "NR PERFORMANCE" in sheets or "NR ANCHOR" in sheets:
+        return "reference"
+    blob = " ".join(sheets)
+    if "NRCELL" in blob or "GNODEBPARAM" in blob or "GNBX2SONCONFIG" in blob:
+        return "5g"
+    if "NSADCMGMTCONFIG" in blob or "ENODEBALGOSWITCH" in blob or "CELLALGOSWITCH" in blob:
+        return "4g"
+    return "unknown"
+
+
+def classify_input_files(paths) -> dict:
+    classified = {"reference": [], "4g": [], "5g": [], "unknown": []}
+    for raw in paths:
+        path = Path(raw).expanduser().resolve()
+        if not path.is_file():
+            classified["unknown"].append(path)
+            continue
+        classified[guess_file_role(path)].append(path)
+    picked = {
+        "reference": newest_file(classified["reference"]),
+        "cfg_4g": newest_file(classified["4g"]),
+        "cfg_5g": newest_file(classified["5g"]),
+        "unknown": classified["unknown"],
+        "all_reference": classified["reference"],
+        "all_4g": classified["4g"],
+        "all_5g": classified["5g"],
+    }
+    return picked
 
 
 def build_run_context(
@@ -1433,16 +1490,24 @@ def append_history(summary, run: RunContext):
 
 def parse_args(argv=None):
     parser = argparse.ArgumentParser(
-        description="Compare Reference Parameter workbook with 4G and 5G configuration dumps."
+        description="Compare Reference Parameter workbook with 4G and 5G configuration dumps. "
+        "Pass several workbooks in any order, or launch the GUI with no arguments."
+    )
+    parser.add_argument(
+        "files",
+        nargs="*",
+        type=Path,
+        help="Input workbooks: Reference + 4G dump + 5G dump (any order, any names)",
     )
     parser.add_argument("--input-dir", type=Path, default=DEFAULT_INPUT_DIR, help="Folder to drop new dumps into")
-    parser.add_argument("--output-dir", type=Path, default=DEFAULT_OUTPUT_DIR, help="Report output folder")
+    parser.add_argument("-o", "--output-dir", type=Path, default=DEFAULT_OUTPUT_DIR, help="Report output folder")
     parser.add_argument("--config", type=Path, default=DEFAULT_CONFIG, help="Optional JSON config with file patterns")
     parser.add_argument("--reference", type=Path, help="Reference Parameter xlsx (optional; auto-detected)")
     parser.add_argument("--config-4g", type=Path, help="4G configuration xlsb/xlsx (optional; auto-detected)")
     parser.add_argument("--config-5g", type=Path, help="5G configuration xlsb/xlsx (optional; auto-detected)")
     parser.add_argument("--run-id", help="Optional run id; default is timestamp YYYYMMDD_HHMMSS")
     parser.add_argument("--list-inputs", action="store_true", help="Show detected input files and exit")
+    parser.add_argument("--gui", action="store_true", help="Open the graphical tool")
     parser.add_argument(
         "--fail-on-inconsistent",
         action="store_true",
@@ -1460,49 +1525,23 @@ def resolve_required_file(label: str, explicit: Path | None, discovered: Path | 
     return path.resolve()
 
 
-def main(argv=None):
-    args = parse_args(argv)
-    cfg = load_audit_config(args.config)
-    discovered = discover_inputs(ROOT, args.input_dir, cfg)
-
-    if args.list_inputs:
-        print("Search folders:")
-        for folder in discovered["search_dirs"]:
-            print(f"  {folder}")
-        print(f"Reference: {discovered['reference']}")
-        print(f"4G config: {discovered['cfg_4g']}")
-        print(f"5G config: {discovered['cfg_5g']}")
-        return 0
-
-    try:
-        reference = resolve_required_file("Reference Parameter workbook", args.reference, discovered["reference"])
-        cfg_4g = resolve_required_file("4G configuration dump", args.config_4g, discovered["cfg_4g"])
-        cfg_5g = resolve_required_file("5G configuration dump", args.config_5g, discovered["cfg_5g"])
-    except FileNotFoundError as exc:
-        print(exc, file=sys.stderr)
-        print("Detected files:", file=sys.stderr)
-        print(f"  reference={discovered['reference']}", file=sys.stderr)
-        print(f"  4G={discovered['cfg_4g']}", file=sys.stderr)
-        print(f"  5G={discovered['cfg_5g']}", file=sys.stderr)
-        return 2
-
+def execute_audit(reference: Path, cfg_4g: Path, cfg_5g: Path, output_dir: Path, run_id=None, progress=print):
     run = build_run_context(
         root=ROOT,
-        reference=reference,
-        cfg_4g=cfg_4g,
-        cfg_5g=cfg_5g,
-        output_dir=args.output_dir,
-        run_id=args.run_id,
+        reference=Path(reference).resolve(),
+        cfg_4g=Path(cfg_4g).resolve(),
+        cfg_5g=Path(cfg_5g).resolve(),
+        output_dir=Path(output_dir),
+        run_id=run_id,
     )
-
-    print(f"Run ID: {run.run_id}")
-    print(f"Reference: {run.reference}")
-    print(f"4G config: {run.cfg_4g}")
-    print(f"5G config: {run.cfg_5g}")
-    print("Loading reference parameters...")
+    progress(f"Run ID: {run.run_id}")
+    progress(f"Reference: {run.reference}")
+    progress(f"4G config: {run.cfg_4g}")
+    progress(f"5G config: {run.cfg_5g}")
+    progress("Loading reference parameters...")
     params = load_reference(run.reference)
-    print(f"  {len(params)} parameters")
-    print("Loading mapping definitions...")
+    progress(f"  {len(params)} parameters")
+    progress("Loading mapping definitions...")
     maps = {
         "5G": load_mapping(run.cfg_5g),
         "4G": load_mapping(run.cfg_4g),
@@ -1511,7 +1550,7 @@ def main(argv=None):
         "5G": SheetCache(run.cfg_5g),
         "4G": SheetCache(run.cfg_4g),
     }
-    print("Resolving and comparing...")
+    progress("Resolving and comparing...")
     for i, param in enumerate(params, start=1):
         mapping = maps[param["network"]]
         resolved = resolve_parameter(param, mapping)
@@ -1519,22 +1558,79 @@ def main(argv=None):
         param["resolved"] = resolved
         param["result"] = result
         if i % 40 == 0:
-            print(f"  {i}/{len(params)}")
+            progress(f"  {i}/{len(params)}")
     summary, func_summary = summarize(params)
-    print("Writing reports...")
+    progress("Writing reports...")
     extras = write_excel(params, summary, func_summary, run)
     write_markdown(params, summary, func_summary, extras, run)
     write_parameter_csv(params, run)
     write_run_summary(summary, run, len(params))
     append_history(summary, run)
     copy_latest(run)
-    print("DONE")
-    print(f"Excel: {run.out_xlsx}")
-    print(f"Markdown: {run.out_md}")
-    print(f"CSV: {run.out_csv}")
-    print(f"Latest copy: {run.latest_dir}")
+    progress("DONE")
+    progress(f"Excel: {run.out_xlsx}")
+    progress(f"Markdown: {run.out_md}")
+    progress(f"CSV: {run.out_csv}")
+    progress(f"Latest copy: {run.latest_dir}")
+    progress("ALL " + str(dict(summary["ALL"])))
+    return run, summary, extras
+
+
+def main(argv=None):
+    args = parse_args(argv)
+    cfg = load_audit_config(args.config)
+    discovered = discover_inputs(ROOT, args.input_dir, cfg)
+    from_files = classify_input_files(args.files) if args.files else None
+
+    if args.list_inputs:
+        print("Search folders:")
+        for folder in discovered["search_dirs"]:
+            print(f"  {folder}")
+        if from_files:
+            print("From selected files:")
+            print(f"  Reference: {from_files['reference']}")
+            print(f"  4G config: {from_files['cfg_4g']}")
+            print(f"  5G config: {from_files['cfg_5g']}")
+            if from_files["unknown"]:
+                print(f"  Unclassified: {from_files['unknown']}")
+        print(f"Reference: {discovered['reference']}")
+        print(f"4G config: {discovered['cfg_4g']}")
+        print(f"5G config: {discovered['cfg_5g']}")
+        return 0
+
+    try:
+        reference = resolve_required_file(
+            "Reference Parameter workbook",
+            args.reference or (from_files["reference"] if from_files else None),
+            None if from_files else discovered["reference"],
+        )
+        cfg_4g = resolve_required_file(
+            "4G configuration dump",
+            args.config_4g or (from_files["cfg_4g"] if from_files else None),
+            None if from_files else discovered["cfg_4g"],
+        )
+        cfg_5g = resolve_required_file(
+            "5G configuration dump",
+            args.config_5g or (from_files["cfg_5g"] if from_files else None),
+            None if from_files else discovered["cfg_5g"],
+        )
+    except FileNotFoundError as exc:
+        print(exc, file=sys.stderr)
+        print("Detected files:", file=sys.stderr)
+        print(f"  reference={discovered['reference']}", file=sys.stderr)
+        print(f"  4G={discovered['cfg_4g']}", file=sys.stderr)
+        print(f"  5G={discovered['cfg_5g']}", file=sys.stderr)
+        if from_files:
+            print(f"  selected reference={from_files['reference']}", file=sys.stderr)
+            print(f"  selected 4G={from_files['cfg_4g']}", file=sys.stderr)
+            print(f"  selected 5G={from_files['cfg_5g']}", file=sys.stderr)
+            print(f"  unclassified={from_files['unknown']}", file=sys.stderr)
+        return 2
+
+    run, summary, extras = execute_audit(
+        reference, cfg_4g, cfg_5g, args.output_dir, run_id=args.run_id
+    )
     print(f"History: {run.history_csv}")
-    print("ALL", dict(summary["ALL"]))
     print("NR Performance", dict(summary["NR Performance"]))
     print("NR Anchor", dict(summary["NR Anchor"]))
     if extras["not_found"]:

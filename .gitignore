@@ -7,3 +7,5 @@ input/*.xlsb
 input/*.xlsx
 input/*.xlsm
 !input/README.md
+build/
+dist/

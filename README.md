@@ -1,75 +1,78 @@
 # Parameter Inconsistency Audit
 
-Compare a **Reference Parameter** workbook with live **4G** and **5G** configuration dumps.
-Use this whenever new configuration exports arrive.
+One tool: **select several input files → get the inconsistency report**.
 
-## Regular run
+## EXE / desktop tool
 
-1. Copy the new dumps into `input/` (keep the reference file there too if it changed).
-2. Run one command:
-
-```bash
-./run_audit.sh
-```
+1. Build once:
 
 Windows:
-
 ```bat
-run_audit.bat
+build_exe.bat
 ```
 
-3. Open the newest report:
+Linux:
+```bash
+./build_exe.sh
+```
+
+2. Run `dist/ParameterAudit.exe` (Windows) or `dist/ParameterAudit` (Linux).
+
+3. Click **Select input files…** and pick all of these together (any order):
+   - Reference Parameter workbook
+   - 4G configuration dump
+   - 5G configuration dump
+
+4. Click **Generate Report**. Output is written to the chosen folder (`reports/` by default):
+   - `Parameter_Inconsistency_Report.xlsx`
+   - `all_parameters.csv`
+   - `Parameter_Inconsistency_Report.md`
+
+Command line (same tool, several files then output folder):
+
+```bash
+./dist/ParameterAudit \
+  "Reference Parameter_v1.0.xlsx" \
+  4G_ConfigurationData_15Sep26.xlsb \
+  5G_ConfigurationData_15Sep26.xlsb \
+  -o reports
+```
+
+Or without building an exe:
+
+```bash
+python3 scripts/parameter_audit_app.py
+python3 scripts/parameter_audit_app.py file1.xlsx file2.xlsb file3.xlsb -o reports
+```
+
+## Folder drop (no GUI)
+
+1. Copy new dumps into `input/`.
+2. Run `./run_audit.sh` or `run_audit.bat`.
+
+Latest copies:
 
 - `reports/latest/Parameter_Inconsistency_Report.xlsx`
-- `reports/latest/Parameter_Inconsistency_Report.md`
-- `reports/latest/all_parameters.csv`
-- `reports/run_history.csv` — one row per run, for trend tracking
-
-Each run is also kept under `reports/runs/<timestamp>/`.
+- `reports/run_history.csv`
 
 ## What the tool expects
 
-| Role | Sheets / files | Network |
+| Role | Typical file | Compared with |
 |---|---|---|
-| Baseline | `Reference Parameter*.xlsx` sheets `NR Performance`, `NR Anchor` | 5G / 4G |
-| 4G dump | `4G_ConfigurationData*.xlsb` or `.xlsx` | compared with `NR Anchor` |
-| 5G dump | `5G_ConfigurationData*.xlsb` or `.xlsx` | compared with `NR Performance` |
+| Baseline | `Reference Parameter*.xlsx` (`NR Performance`, `NR Anchor`) | recommend values |
+| 4G dump | `4G_ConfigurationData*.xlsb` / `.xlsx` | NR Anchor |
+| 5G dump | `5G_ConfigurationData*.xlsb` / `.xlsx` | NR Performance |
 
-Files are auto-detected from `input/` first, then the repo root. The newest matching file wins.
-
-## Optional arguments
-
-```bash
-# Show which files would be used
-./run_audit.sh --list-inputs
-
-# Point at explicit files
-./run_audit.sh --reference "Reference Parameter_v1.0.xlsx" \
-  --config-4g 4G_ConfigurationData_15Sep26.xlsb \
-  --config-5g 5G_ConfigurationData_15Sep26.xlsb
-
-# Fail (exit code 1) if any auditable parameter is inconsistent
-./run_audit.sh --fail-on-inconsistent
-```
-
-## First-time setup
-
-```bash
-python3 -m pip install -r requirements.txt
-```
-
-`run_audit.sh` / `run_audit.bat` install the packages automatically if they are missing.
+Files can be named differently; the tool also looks inside the workbook if needed.
 
 ## Report contents
 
-1. Overall report — counts from both sheets, function-wise summary, material gaps
-2. All parameter-wise report — every parameter by function
-3. Sheet-wise report — NR Performance (5G) and NR Anchor (4G)
+1. Overall report
+2. All parameter-wise report (function wise)
+3. Sheet-wise report
 4. Final summary
 
 ## Sample result (15 Sep 2026 dumps)
-
-The first audit against the files in this repo is saved as:
 
 - `reports/Parameter_Inconsistency_Report_15Sep26.xlsx`
 - `reports/Parameter_Inconsistency_Report_15Sep26.md`

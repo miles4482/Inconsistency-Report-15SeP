@@ -1,0 +1,28 @@
+name: Build ParameterAudit EXE
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - "scripts/**"
+      - "ParameterAudit.spec"
+      - "requirements.txt"
+      - "build_exe.*"
+      - ".github/workflows/build-exe.yml"
+
+jobs:
+  windows-exe:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install and build
+        run: |
+          python -m pip install -r requirements.txt pyinstaller
+          python -m PyInstaller --noconfirm --clean ParameterAudit.spec
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ParameterAudit-windows
+          path: dist/ParameterAudit.exe
