@@ -8,7 +8,12 @@ a = Analysis(
     ["scripts/parameter_audit_app.py"],
     pathex=["scripts"],
     binaries=[],
-    datas=[],
+    datas=[
+        ("How_to_use.txt", "."),
+        ("app_folders/Input", "Input"),
+        ("app_folders/Reference", "Reference"),
+        ("app_folders/Output", "Output"),
+    ],
     hiddenimports=hidden,
     hookspath=[],
     hooksconfig={},

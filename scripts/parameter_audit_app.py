@@ -1,8 +1,10 @@
 #!/usr/bin/env python3
 """Parameter Inconsistency Audit tool.
 
-Select local files or a local folder on this PC (no upload, no size limit).
-Write the report to a local output folder on this PC.
+Three local folders on this PC (no upload, no size limit):
+    Input Folder      configuration dumps used for comparing
+    Reference Folder  recommended / plan values
+    Output Folder     inconsistency reports
 """
 
 from __future__ import annotations
@@ -27,13 +29,6 @@ if str(SCRIPT_DIR) not in sys.path:
 import compare_reference_parameters as audit  # noqa: E402
 
 
-FILETYPES = [
-    ("Excel workbooks", "*.xlsx *.xlsb *.xlsm"),
-    ("All files", "*.*"),
-]
-WORKBOOK_SUFFIXES = {".xlsx", ".xlsb", ".xlsm"}
-
-
 def open_path(path: Path):
     path = Path(path)
     if sys.platform.startswith("win"):
@@ -44,9 +39,29 @@ def open_path(path: Path):
         subprocess.Popen(["xdg-open", str(path)])
 
 
-def default_output_dir() -> Path:
-    docs = Path.home() / "Documents" / "ParameterAudit_Reports"
-    return docs
+def app_root() -> Path:
+    return audit.ROOT
+
+
+def ensure_default_folders() -> dict[str, Path]:
+    root = app_root()
+    folders = {
+        "input": root / "Input" if (root / "Input").is_dir() else root / "input",
+        "reference": root / "Reference" if (root / "Reference").is_dir() else root / "reference",
+        "output": root / "Output" if (root / "Output").is_dir() else root / "reports",
+    }
+    if getattr(sys, "frozen", False):
+        folders = {
+            "input": root / "Input",
+            "reference": root / "Reference",
+            "output": root / "Output",
+        }
+        for path in folders.values():
+            path.mkdir(parents=True, exist_ok=True)
+    else:
+        for path in folders.values():
+            path.mkdir(parents=True, exist_ok=True)
+    return folders
 
 
 def format_size(path: Path) -> str:
@@ -63,160 +78,96 @@ def format_size(path: Path) -> str:
     return f"{n:.1f} TB"
 
 
-def collect_workbooks(folder: Path) -> list[Path]:
-    files = []
-    if not folder.is_dir():
-        return files
-    for path in folder.iterdir():
-        if path.is_file() and path.suffix.lower() in WORKBOOK_SUFFIXES:
-            files.append(path)
-    return files
-
-
-def launch_gui(preselected=None):
+def launch_gui():
     import tkinter as tk
     from tkinter import filedialog, messagebox
 
+    defaults = ensure_default_folders()
     root = tk.Tk()
     root.title("Parameter Inconsistency Audit")
-    root.geometry("860x640")
-    root.minsize(760, 580)
+    root.geometry("920x720")
+    root.minsize(820, 640)
 
-    selected: list[Path] = list(preselected or [])
-    output_var = tk.StringVar(value=str(default_output_dir()))
-    ref_var = tk.StringVar(value="(not selected)")
-    g4_var = tk.StringVar(value="(not selected)")
-    g5_var = tk.StringVar(value="(not selected)")
+    input_var = tk.StringVar(value=str(defaults["input"]))
+    reference_var = tk.StringVar(value=str(defaults["reference"]))
+    output_var = tk.StringVar(value=str(defaults["output"]))
     status_var = tk.StringVar(
-        value="All files stay on this PC. Select local input files/folder, then a local output folder."
+        value="Select Input Folder, Reference Folder, and Output Folder on this PC. Files are not uploaded."
     )
     last_report = {"path": None}
 
-    def refresh_classification():
-        result = audit.classify_input_files(selected)
-        ref_var.set(
-            f"{result['reference'].name}  ({format_size(result['reference'])})  [{result['reference']}]"
-            if result["reference"]
-            else "(not selected)"
-        )
-        g4_var.set(
-            f"{result['cfg_4g'].name}  ({format_size(result['cfg_4g'])})  [{result['cfg_4g']}]"
-            if result["cfg_4g"]
-            else "(not selected)"
-        )
-        g5_var.set(
-            f"{result['cfg_5g'].name}  ({format_size(result['cfg_5g'])})  [{result['cfg_5g']}]"
-            if result["cfg_5g"]
-            else "(not selected)"
-        )
-        file_list.delete(0, tk.END)
-        for path in selected:
-            role = audit.guess_file_role(path)
-            file_list.insert(tk.END, f"{role.upper():<10} {format_size(path):>10}   {path}")
-        unknown = result["unknown"]
-        if unknown:
-            status_var.set(
-                f"{len(unknown)} local file(s) not classified. Use Reference/4G/5G in the file name if needed."
-            )
-        elif result["reference"] and result["cfg_4g"] and result["cfg_5g"]:
-            status_var.set("Local inputs detected. Choose output folder on this PC, then Generate Report.")
+    def folder_listing(folder_text: str) -> list[Path]:
+        folder = Path(folder_text).expanduser()
+        return audit.list_workbooks(folder)
+
+    def refresh_lists():
+        input_list.delete(0, tk.END)
+        ref_list.delete(0, tk.END)
+        inputs = folder_listing(input_var.get())
+        refs = folder_listing(reference_var.get())
+        if inputs:
+            for path in inputs:
+                input_list.insert(tk.END, f"{format_size(path):>10}   {path.name}")
         else:
-            status_var.set("Select one Reference, one 4G dump, and one 5G dump from this PC (any size).")
-        return result
-
-    def add_paths(paths):
-        for item in paths:
-            path = Path(item)
-            if path not in selected:
-                selected.append(path)
-        refresh_classification()
-
-    def add_files():
-        paths = filedialog.askopenfilenames(
-            title="Select files from this PC (Reference + 4G + 5G). No size limit.",
-            filetypes=FILETYPES,
+            input_list.insert(tk.END, "(no .xlsx / .xlsb / .xlsm files yet)")
+        if refs:
+            for path in refs:
+                ref_list.insert(tk.END, f"{format_size(path):>10}   {path.name}")
+        else:
+            ref_list.insert(tk.END, "(no .xlsx / .xlsb / .xlsm files yet)")
+        status_var.set(
+            f"Input: {len(inputs)} file(s)  |  Reference: {len(refs)} file(s)  |  "
+            "Every input file is compared with every reference file."
         )
-        add_paths(paths)
+        return inputs, refs
 
-    def add_folder():
+    def pick_folder(var: tk.StringVar, title: str):
         folder = filedialog.askdirectory(
-            title="Select a folder on this PC that contains the workbooks"
-        )
-        if not folder:
-            return
-        found = collect_workbooks(Path(folder))
-        if not found:
-            messagebox.showwarning(
-                "No workbooks",
-                "No .xlsx / .xlsb / .xlsm files in that folder.\nFiles are read from your PC only.",
-            )
-            return
-        add_paths(found)
-
-    def pick_one(kind: str):
-        title = {
-            "reference": "Select Reference Parameter file from this PC",
-            "4g": "Select 4G configuration dump from this PC",
-            "5g": "Select 5G configuration dump from this PC",
-        }[kind]
-        path = filedialog.askopenfilename(title=title, filetypes=FILETYPES)
-        if not path:
-            return
-        path = Path(path)
-        remaining = []
-        for existing in selected:
-            if audit.guess_file_role(existing) == kind:
-                continue
-            remaining.append(existing)
-        remaining.append(path)
-        selected.clear()
-        selected.extend(remaining)
-        refresh_classification()
-
-    def clear_files():
-        selected.clear()
-        refresh_classification()
-
-    def choose_output():
-        folder = filedialog.askdirectory(
-            title="Select output folder on this PC (report will be saved here)",
-            initialdir=output_var.get() or str(Path.home()),
+            title=title,
+            initialdir=var.get() or str(Path.home()),
         )
         if folder:
-            output_var.set(folder)
+            var.set(folder)
+            refresh_lists()
 
     def set_buttons(state):
         for btn in action_buttons:
             btn.config(state=state)
 
     def generate():
-        classified = refresh_classification()
-        missing = []
-        if not classified["reference"]:
-            missing.append("Reference Parameter")
-        if not classified["cfg_4g"]:
-            missing.append("4G configuration")
-        if not classified["cfg_5g"]:
-            missing.append("5G configuration")
-        if missing:
-            messagebox.showerror("Missing input", "Select from this PC:\n- " + "\n- ".join(missing))
+        inputs, refs = refresh_lists()
+        if len(inputs) < 1:
+            messagebox.showerror(
+                "Input Folder empty",
+                "Put at least one configuration dump in the Input Folder.\n"
+                "Names can be anything (4G dump, 5G dump, 2G dump, ...).\n"
+                "Any number of files and sheets is allowed.",
+            )
+            return
+        if len(refs) < 1:
+            messagebox.showerror(
+                "Reference Folder empty",
+                "Put at least one recommended/plan-value workbook in the Reference Folder.\n"
+                "Every file in that folder is treated as a reference.",
+            )
             return
         output_dir = Path(output_var.get()).expanduser()
         if not str(output_var.get()).strip():
-            messagebox.showerror("Missing output", "Select an output folder on this PC.")
+            messagebox.showerror("Missing Output Folder", "Select an Output Folder on this PC.")
             return
         output_dir.mkdir(parents=True, exist_ok=True)
         set_buttons(tk.DISABLED)
         log_box.delete("1.0", tk.END)
         log_box.insert(
             tk.END,
-            "Reading files from your PC (not uploaded).\n"
-            f"Reference: {classified['reference']}\n"
-            f"4G: {classified['cfg_4g']}\n"
-            f"5G: {classified['cfg_5g']}\n"
-            f"Output folder: {output_dir}\n\n",
+            "Reading folders from your PC (not uploaded).\n"
+            f"Input Folder ({len(inputs)} files): {input_var.get()}\n"
+            + "".join(f"  - {p.name}\n" for p in inputs)
+            + f"Reference Folder ({len(refs)} files): {reference_var.get()}\n"
+            + "".join(f"  - {p.name}\n" for p in refs)
+            + f"Output Folder: {output_dir}\n\n",
         )
-        status_var.set("Running audit on local files...")
+        status_var.set("Running audit on local folders...")
         messages: queue.Queue = queue.Queue()
 
         def progress(msg: str):
@@ -224,11 +175,10 @@ def launch_gui(preselected=None):
 
         def worker():
             try:
-                run, summary, _extras = audit.execute_audit(
-                    classified["reference"],
-                    classified["cfg_4g"],
-                    classified["cfg_5g"],
-                    output_dir,
+                run, summary, _extras = audit.execute_folder_audit(
+                    output_dir=output_dir,
+                    input_folder=Path(input_var.get()),
+                    reference_folder=Path(reference_var.get()),
                     progress=progress,
                 )
                 messages.put(("done", run, summary))
@@ -276,7 +226,7 @@ def launch_gui(preselected=None):
         else:
             messagebox.showinfo("No report yet", "Generate a report first.")
 
-    header = tk.Frame(root, bg="#1F4E79", height=84)
+    header = tk.Frame(root, bg="#1F4E79", height=88)
     header.pack(fill=tk.X)
     tk.Label(
         header,
@@ -287,7 +237,7 @@ def launch_gui(preselected=None):
     ).pack(anchor="w", padx=16, pady=(12, 0))
     tk.Label(
         header,
-        text="Input and output are folders/files on THIS PC. Files are not uploaded. No size limit.",
+        text="Three folders on THIS PC: Input (dumps) · Reference (plan values) · Output (reports). No upload. No file-count limit.",
         fg="#D6E3F0",
         bg="#1F4E79",
         font=("Segoe UI", 10),
@@ -296,47 +246,51 @@ def launch_gui(preselected=None):
     body = tk.Frame(root, padx=16, pady=12)
     body.pack(fill=tk.BOTH, expand=True)
 
-    btns = tk.Frame(body)
-    btns.pack(fill=tk.X)
-    add_btn = tk.Button(btns, text="Select files from this PC…", command=add_files, width=26)
-    add_btn.pack(side=tk.LEFT)
-    folder_btn = tk.Button(btns, text="Select input folder from this PC…", command=add_folder, width=30)
-    folder_btn.pack(side=tk.LEFT, padx=8)
-    tk.Button(btns, text="Clear", command=clear_files, width=10).pack(side=tk.LEFT)
+    def folder_row(parent, label, var, browse_title, hint):
+        frame = tk.LabelFrame(parent, text=label, padx=8, pady=6)
+        frame.pack(fill=tk.X, pady=(0, 8))
+        tk.Label(frame, text=hint, anchor="w", justify="left", wraplength=840, fg="#333").pack(fill=tk.X)
+        row = tk.Frame(frame)
+        row.pack(fill=tk.X, pady=(4, 4))
+        tk.Entry(row, textvariable=var).pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(0, 8))
+        btn = tk.Button(row, text="Browse this PC…", command=lambda: pick_folder(var, browse_title), width=16)
+        btn.pack(side=tk.LEFT)
+        listing = tk.Listbox(frame, height=4)
+        listing.pack(fill=tk.X)
+        return btn, listing
 
-    one = tk.Frame(body)
-    one.pack(fill=tk.X, pady=(8, 0))
-    tk.Button(one, text="Reference…", command=lambda: pick_one("reference"), width=14).pack(side=tk.LEFT)
-    tk.Button(one, text="4G dump…", command=lambda: pick_one("4g"), width=14).pack(side=tk.LEFT, padx=8)
-    tk.Button(one, text="5G dump…", command=lambda: pick_one("5g"), width=14).pack(side=tk.LEFT)
-
-    tk.Label(body, text="Local files (full path on your PC)", font=("Segoe UI", 10, "bold")).pack(
-        anchor="w", pady=(12, 4)
+    input_btn, input_list = folder_row(
+        body,
+        "1. Input Folder  (files used for comparing)",
+        input_var,
+        "Select Input Folder — configuration dumps (4G, 5G, 2G, any names)",
+        "Any file names. More than one file. Any number of sheets and columns. "
+        "Sheet names that match an MO / MML Object are treated as that object. Every file is checked.",
     )
-    file_list = tk.Listbox(body, height=6)
-    file_list.pack(fill=tk.X)
-
-    detect = tk.Frame(body)
-    detect.pack(fill=tk.X, pady=8)
-    for label, var in (
-        ("Reference", ref_var),
-        ("4G dump", g4_var),
-        ("5G dump", g5_var),
-    ):
-        row = tk.Frame(detect)
-        row.pack(fill=tk.X, pady=2)
-        tk.Label(row, text=f"{label}:", width=12, anchor="w", font=("Segoe UI", 10, "bold")).pack(side=tk.LEFT)
-        tk.Label(row, textvariable=var, anchor="w", wraplength=680, justify="left").pack(
-            side=tk.LEFT, fill=tk.X, expand=True
-        )
-
-    out_row = tk.Frame(body)
-    out_row.pack(fill=tk.X, pady=(8, 4))
-    tk.Label(out_row, text="Output folder on this PC:", width=22, anchor="w", font=("Segoe UI", 10, "bold")).pack(
-        side=tk.LEFT
+    ref_btn, ref_list = folder_row(
+        body,
+        "2. Reference Folder  (recommended / plan values)",
+        reference_var,
+        "Select Reference Folder — every workbook is a reference",
+        "Any file names (2, 3, 4… files). Different sheet names and many columns. Every file is analyzed against the Input Folder.",
     )
+    out_frame = tk.LabelFrame(body, text="3. Output Folder  (inconsistency reports)", padx=8, pady=6)
+    out_frame.pack(fill=tk.X, pady=(0, 8))
+    tk.Label(
+        out_frame,
+        text="All Excel / Markdown / CSV reports are written here.",
+        anchor="w",
+        fg="#333",
+    ).pack(fill=tk.X)
+    out_row = tk.Frame(out_frame)
+    out_row.pack(fill=tk.X, pady=(4, 0))
     tk.Entry(out_row, textvariable=output_var).pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(0, 8))
-    out_btn = tk.Button(out_row, text="Browse this PC…", command=choose_output, width=16)
+    out_btn = tk.Button(
+        out_row,
+        text="Browse this PC…",
+        command=lambda: pick_folder(output_var, "Select Output Folder for reports"),
+        width=16,
+    )
     out_btn.pack(side=tk.LEFT)
 
     action = tk.Frame(body)
@@ -351,16 +305,28 @@ def launch_gui(preselected=None):
         action, text="Open output folder", command=lambda: open_path(Path(output_var.get())), width=18
     )
     folder_out_btn.pack(side=tk.LEFT)
+    refresh_btn = tk.Button(action, text="Refresh file lists", command=refresh_lists, width=16)
+    refresh_btn.pack(side=tk.LEFT, padx=8)
 
-    action_buttons = [add_btn, folder_btn, generate_btn, out_btn, folder_out_btn]
+    action_buttons = [input_btn, ref_btn, generate_btn, out_btn, folder_out_btn, refresh_btn]
 
-    tk.Label(body, textvariable=status_var, anchor="w", wraplength=800, justify="left").pack(fill=tk.X, pady=(4, 4))
+    tk.Label(
+        body,
+        text=(
+            "Note: Microsoft Excel allows 1,048,576 rows and 16,384 columns per sheet. "
+            "This tool does not add a lower limit on files, sheets, or columns. "
+            "Very large dumps use more RAM and take longer."
+        ),
+        anchor="w",
+        wraplength=860,
+        justify="left",
+        fg="#444",
+    ).pack(fill=tk.X, pady=(0, 4))
+    tk.Label(body, textvariable=status_var, anchor="w", wraplength=860, justify="left").pack(fill=tk.X, pady=(0, 4))
     log_box = tk.Text(body, height=8, wrap=tk.WORD)
     log_box.pack(fill=tk.BOTH, expand=True)
 
-    if selected:
-        refresh_classification()
-
+    refresh_lists()
     root.mainloop()
 
 
@@ -368,9 +334,7 @@ def main(argv=None):
     argv = list(sys.argv[1:] if argv is None else argv)
     if "--gui" in argv:
         argv = [a for a in argv if a != "--gui"]
-        args = audit.parse_args(argv)
-        preselected = list(args.files)
-        launch_gui(preselected)
+        launch_gui()
         return 0
     if not argv:
         launch_gui()

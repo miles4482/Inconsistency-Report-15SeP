@@ -8,7 +8,8 @@ on:
       - "ParameterAudit.spec"
       - "requirements.txt"
       - "build_exe.*"
-      - ".github/workflows/build-exe.yml"
+      - "How_to_use.txt"
+      - "app_folders/**"
 
 jobs:
   windows-exe:

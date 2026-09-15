@@ -1,8 +1,14 @@
 #!/usr/bin/env python3
-"""Compare a Reference Parameter workbook against 4G and 5G configuration dumps.
+"""Compare every reference workbook against every input dump.
+
+Three local folders:
+    Input Folder      configuration dumps (any names, any RAT, many files)
+    Reference Folder  recommended / plan values (any names, many files)
+    Output Folder     inconsistency reports
 
 Regular use:
-    python3 scripts/compare_reference_parameters.py
+    python3 scripts/parameter_audit_app.py
+    python3 scripts/compare_reference_parameters.py --input-folder ... --reference-folder ... --output-folder ...
     ./run_audit.sh
     run_audit.bat
 """
@@ -17,7 +23,7 @@ import re
 import shutil
 import sys
 from collections import Counter, defaultdict
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
 
@@ -25,6 +31,9 @@ from openpyxl import Workbook, load_workbook
 from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
 from openpyxl.utils import get_column_letter
 from pyxlsb import open_workbook
+
+
+WORKBOOK_SUFFIXES = {".xlsx", ".xlsb", ".xlsm"}
 
 
 def runtime_root() -> Path:
@@ -35,6 +44,7 @@ def runtime_root() -> Path:
 
 ROOT = runtime_root()
 DEFAULT_INPUT_DIR = ROOT / "input"
+DEFAULT_REFERENCE_DIR = ROOT / "reference"
 DEFAULT_OUTPUT_DIR = ROOT / "reports"
 DEFAULT_CONFIG = ROOT / "config" / "audit.json"
 
@@ -73,14 +83,72 @@ META_SHEETS = {
     "VALID DEF",
     "COMMENTS",
 }
+SKIP_REF_SHEETS = {
+    "TITLE",
+    "SUMMARY",
+    "COVER",
+    "INDEX",
+    "README",
+    "REVISION",
+    "CHANGELOG",
+    "HISTORY",
+    "NOTES",
+}
+REF_HEADER_ALIASES = {
+    "function": {"FUNCTION", "FEATURE", "CATEGORY", "AREA", "DOMAIN", "GROUP"},
+    "mml": {
+        "MMLOBJECT",
+        "MMLOBJECTNAME",
+        "MML",
+        "MO",
+        "MOC",
+        "MONAME",
+        "OBJECT",
+        "OBJECTNAME",
+        "MANAGEDOBJECT",
+        "MMLOBJECTNAME",
+        "NEOBJECT",
+    },
+    "pid": {
+        "PARAMETERID",
+        "PARAMETER",
+        "PARAMETERNAME",
+        "PARAMID",
+        "PARA",
+        "PARANAME",
+        "ATTR",
+        "ATTRIBUTE",
+        "ATTRIBUTENAME",
+        "PARAM",
+    },
+    "recommend": {
+        "RECOMMENDVALUE",
+        "RECOMMENDEDVALUE",
+        "RECOMMEND",
+        "RECOMMENDED",
+        "PLANVALUE",
+        "PLANNEDVALUE",
+        "TARGETVALUE",
+        "EXPECTEDVALUE",
+        "BASELINEVALUE",
+        "REFVALUE",
+        "STANDARDVALUE",
+        "GOLDENVALUE",
+        "PLAN",
+    },
+}
+
+# Microsoft Excel worksheet limits. This tool does not impose a lower cap.
+EXCEL_MAX_ROWS = 1_048_576
+EXCEL_MAX_COLS = 16_384
 
 
 @dataclass
 class RunContext:
     root: Path
     reference: Path
-    cfg_4g: Path
-    cfg_5g: Path
+    cfg_4g: Path | None
+    cfg_5g: Path | None
     output_dir: Path
     run_id: str
     audit_date: str
@@ -90,6 +158,10 @@ class RunContext:
     out_summary: Path
     history_csv: Path
     latest_dir: Path
+    input_folder: Path | None = None
+    reference_folder: Path | None = None
+    input_files: list = field(default_factory=list)
+    reference_files: list = field(default_factory=list)
 
 
 def workbook_kind(path: Path) -> str:
@@ -98,7 +170,22 @@ def workbook_kind(path: Path) -> str:
         return "xlsb"
     if suffix in {".xlsx", ".xlsm"}:
         return "xlsx"
-    raise ValueError(f"Unsupported workbook type: {path}")
+    raise ValueError(f"Unsupported workbook type: {path.name} ({suffix or 'no extension'}). Use .xlsx, .xlsb or .xlsm.")
+
+
+def is_workbook(path: Path) -> bool:
+    return path.is_file() and path.suffix.lower() in WORKBOOK_SUFFIXES
+
+
+def list_workbooks(folder: Path | None) -> list[Path]:
+    if folder is None:
+        return []
+    folder = Path(folder).expanduser()
+    if not folder.exists() or not folder.is_dir():
+        return []
+    files = [p for p in folder.iterdir() if is_workbook(p)]
+    files.sort(key=lambda p: p.name.lower())
+    return files
 
 
 def sheet_names(path: Path) -> list[str]:
@@ -235,10 +322,14 @@ def classify_input_files(paths) -> dict:
 def build_run_context(
     root: Path,
     reference: Path,
-    cfg_4g: Path,
-    cfg_5g: Path,
+    cfg_4g: Path | None,
+    cfg_5g: Path | None,
     output_dir: Path,
     run_id: str | None = None,
+    input_folder: Path | None = None,
+    reference_folder: Path | None = None,
+    input_files: list | None = None,
+    reference_files: list | None = None,
 ) -> RunContext:
     now = datetime.now()
     run_id = run_id or now.strftime("%Y%m%d_%H%M%S")
@@ -246,11 +337,13 @@ def build_run_context(
     run_dir.mkdir(parents=True, exist_ok=True)
     latest_dir = output_dir / "latest"
     latest_dir.mkdir(parents=True, exist_ok=True)
+    reference_files = [Path(p) for p in (reference_files or [reference])]
+    input_files = [Path(p) for p in (input_files or [p for p in (cfg_4g, cfg_5g) if p])]
     return RunContext(
         root=root,
-        reference=reference,
-        cfg_4g=cfg_4g,
-        cfg_5g=cfg_5g,
+        reference=Path(reference),
+        cfg_4g=Path(cfg_4g) if cfg_4g else None,
+        cfg_5g=Path(cfg_5g) if cfg_5g else None,
         output_dir=output_dir,
         run_id=run_id,
         audit_date=now.strftime("%d %b %Y"),
@@ -260,6 +353,10 @@ def build_run_context(
         out_summary=run_dir / "run_summary.json",
         history_csv=output_dir / "run_history.csv",
         latest_dir=latest_dir,
+        input_folder=Path(input_folder) if input_folder else None,
+        reference_folder=Path(reference_folder) if reference_folder else None,
+        input_files=input_files,
+        reference_files=reference_files,
     )
 
 
@@ -411,14 +508,31 @@ class SheetCache:
             self.cache[sheet_name] = None
             return None
         rows = read_sheet_rows(self.path, sheet_name)
-        if not rows or len(rows) < 2:
+        if not rows or len(rows) < 1:
             self.cache[sheet_name] = None
             return None
-        headers = [clean_text(h) if h is not None else f"col_{i}" for i, h in enumerate(rows[1])]
-        header_index = {h: i for i, h in enumerate(headers)}
-        header_norm = {norm_key(h): i for i, h in enumerate(headers)}
+        huawei_mode = any(norm_key(n) == "MAPPINGDEF" for n in self.names())
+        if huawei_mode and len(rows) >= 2:
+            header_row, data_start = 1, 2
+        else:
+            header_row, data_start = detect_data_header_row(rows)
+        if header_row >= len(rows):
+            self.cache[sheet_name] = None
+            return None
+        raw_headers = rows[header_row]
+        headers = [clean_text(h) if h is not None else f"col_{i}" for i, h in enumerate(raw_headers)]
+        header_index = {h: i for i, h in enumerate(headers) if h}
+        header_norm = {norm_key(h): i for i, h in enumerate(headers) if norm_key(h)}
+        if header_row > 0:
+            for i, h in enumerate(rows[0]):
+                nk = norm_key(h)
+                if nk and nk not in header_norm:
+                    header_norm[nk] = i
+                    text = clean_text(h)
+                    if text and text not in header_index:
+                        header_index[text] = i
         records = []
-        for row in rows[2:]:
+        for row in rows[data_start:]:
             if not row or all(is_empty(v) for v in row):
                 continue
             records.append(row)
@@ -430,6 +544,27 @@ class SheetCache:
         }
         self.cache[sheet_name] = payload
         return payload
+
+
+def detect_data_header_row(rows) -> tuple[int, int]:
+    """Return (header_row_index, first_data_row_index).
+
+    Huawei bulk dumps typically have technical names on row 1 and display
+    names on row 2. Generic workbooks use row 1 as headers.
+    """
+    if len(rows) >= 2:
+        first = [norm_key(c) for c in (rows[0] or [])[:12]]
+        huawei_markers = {"MODIND", "MOI", "FDN", "NE", "BN", "SN"}
+        if any(m in first for m in huawei_markers):
+            return 1, 2
+        row0_filled = [c for c in (rows[0] or []) if not is_empty(c)]
+        row1_filled = [c for c in (rows[1] or []) if not is_empty(c)]
+        row1_star = sum(1 for c in row1_filled if str(c).lstrip().startswith("*"))
+        if row1_star >= 1 and len(row1_filled) >= len(row0_filled):
+            return 1, 2
+        if len(row0_filled) <= 3 and len(row1_filled) >= 4:
+            return 1, 2
+    return 0, 1
 
 
 def find_attr_record(mapping, moc_name, attr_name):
@@ -640,27 +775,335 @@ def compare_param(param, resolved, cache):
     return out
 
 
-def load_reference(ref_path: Path):
-    wb = load_workbook(ref_path, data_only=True)
+def detect_ref_header_map(header_row) -> dict:
+    mapping = {}
+    for i, cell in enumerate(header_row or []):
+        key = norm_key(cell)
+        if not key:
+            continue
+        for field, aliases in REF_HEADER_ALIASES.items():
+            if key in aliases and field not in mapping:
+                mapping[field] = i
+    return mapping
+
+
+def is_skipped_ref_sheet(sheet_name: str) -> bool:
+    key = norm_key(sheet_name)
+    skipped = {norm_key(s) for s in SKIP_REF_SHEETS | META_SHEETS}
+    return key in skipped
+
+
+def guess_network_label(*parts) -> str:
+    blob = " ".join(clean_text(p) for p in parts if p).upper()
+    if re.search(r"(^|[^0-9])5G([^0-9]|$)", blob) or "NR PERFORMANCE" in blob or "GNODEB" in blob:
+        return "5G"
+    if re.search(r"(^|[^0-9])4G([^0-9]|$)", blob) or "NR ANCHOR" in blob or re.search(r"\bLTE\b", blob):
+        return "4G"
+    if re.search(r"(^|[^0-9])2G([^0-9]|$)", blob) or "GSM" in blob or "BSC" in blob:
+        return "2G"
+    if "3G" in blob or "NODEB" in blob or "RNC" in blob or "UMTS" in blob:
+        return "3G"
+    return ""
+
+
+def load_reference_file(ref_path: Path, ref_count: int = 1):
     params = []
-    for sheet_name in ["NR Performance", "NR Anchor"]:
-        ws = wb[sheet_name]
-        for row_idx, row in enumerate(ws.iter_rows(min_row=2, values_only=True), start=2):
-            func, mml, pid, rec = (list(row) + [None, None, None, None])[:4]
+    names = sheet_names(ref_path)
+    for sheet_name in names:
+        if is_skipped_ref_sheet(sheet_name):
+            continue
+        rows = read_sheet_rows(ref_path, sheet_name)
+        if not rows:
+            continue
+        header_idx = None
+        header_map = None
+        for i, row in enumerate(rows[:12]):
+            candidate = detect_ref_header_map(row)
+            if "pid" in candidate and ("recommend" in candidate or "mml" in candidate):
+                header_idx = i
+                header_map = candidate
+                break
+        if header_map is None:
+            continue
+        sheet_as_mo = "mml" not in header_map
+        for offset, row in enumerate(rows[header_idx + 1 :], start=header_idx + 2):
+            def cell(field):
+                idx = header_map.get(field)
+                if idx is None or row is None or idx >= len(row):
+                    return None
+                return row[idx]
+
+            mml = clean_text(cell("mml"))
+            pid = clean_text(cell("pid"))
             if is_empty(mml) and is_empty(pid):
                 continue
+            if is_empty(pid):
+                continue
+            if is_empty(mml):
+                mml = sheet_name
+                sheet_as_mo = True
+            rec = cell("recommend")
+            sheet_key = sheet_name if ref_count <= 1 else f"{ref_path.name} | {sheet_name}"
             params.append(
                 {
+                    "ref_file": ref_path.name,
+                    "ref_path": str(ref_path),
                     "ref_sheet": sheet_name,
-                    "ref_row": row_idx,
-                    "function": clean_text(func) or "Unspecified",
-                    "mml": clean_text(mml),
-                    "pid": clean_text(pid),
+                    "sheet_key": sheet_key,
+                    "ref_row": offset,
+                    "function": clean_text(cell("function")) or "Unspecified",
+                    "mml": mml,
+                    "pid": pid,
                     "recommend": rec if not is_empty(rec) else None,
-                    "network": "5G" if sheet_name == "NR Performance" else "4G",
+                    "network": guess_network_label(ref_path.name, sheet_name),
+                    "sheet_is_mo": sheet_as_mo,
                 }
             )
     return params
+
+
+def load_reference(ref_path: Path):
+    """Load one reference workbook (any qualifying sheets, not only NR Performance / NR Anchor)."""
+    return load_reference_file(Path(ref_path), ref_count=1)
+
+
+def load_all_references(ref_files: list[Path]):
+    params = []
+    missing = []
+    for path in ref_files:
+        loaded = load_reference_file(path, ref_count=len(ref_files))
+        if not loaded:
+            missing.append(path.name)
+            continue
+        params.extend(loaded)
+    return params, missing
+
+
+def find_column_index(sheet, name: str):
+    if not name or not sheet:
+        return None
+    idx = sheet["header_index"].get(name)
+    if idx is not None:
+        return idx
+    return sheet["header_norm"].get(norm_key(name))
+
+
+def resolve_by_sheet_name(param, workbook_names, cache):
+    """Treat a matching input sheet name as the MML / MO object."""
+    result = {
+        "sheet": None,
+        "column": None,
+        "attr": None,
+        "bit": None,
+        "moc": None,
+        "reason": "",
+    }
+    mml = clean_text(param.get("mml"))
+    pid = clean_text(param.get("pid"))
+    if not pid:
+        result["reason"] = "Missing Parameter ID"
+        return result
+    name_index = {norm_key(n): n for n in workbook_names if not is_skipped_ref_sheet(n) and norm_key(n) not in {norm_key(s) for s in META_SHEETS}}
+    sheet = name_index.get(norm_key(mml)) if mml else None
+    if sheet is None and mml:
+        for key, actual in name_index.items():
+            if key.endswith(norm_key(mml)) or norm_key(mml).endswith(key):
+                if min(len(key), len(norm_key(mml))) >= 6:
+                    sheet = actual
+                    break
+    if sheet is None:
+        result["reason"] = f"No input sheet named as MO '{mml}'"
+        return result
+    payload = cache.get(sheet)
+    if not payload:
+        result["reason"] = f"Sheet not present: {sheet}"
+        return result
+    left, right = (pid.split("@", 1) + [None])[:2] if "@" in pid else (pid, None)
+    left, right = clean_text(left), clean_text(right) if right else None
+    candidates = [c for c in (left, right, pid) if c]
+    col_idx = None
+    col_name = None
+    bit_name = None
+    for cand in candidates:
+        idx = find_column_index(payload, cand)
+        if idx is not None:
+            col_idx = idx
+            col_name = payload["headers"][idx]
+            bit_name = next((c for c in candidates if norm_key(c) != norm_key(cand)), None)
+            break
+    if col_idx is None and right:
+        idx = find_column_index(payload, right)
+        if idx is not None:
+            col_idx = idx
+            col_name = payload["headers"][idx]
+            bit_name = left
+    if col_idx is None:
+        result["reason"] = f"Column not present on sheet {sheet}: {pid}"
+        result["sheet"] = sheet
+        return result
+    result.update(
+        {
+            "sheet": sheet,
+            "column": col_name,
+            "attr": col_name,
+            "bit": bit_name,
+            "moc": mml or sheet,
+            "reason": "OK",
+        }
+    )
+    return result
+
+
+class InputWorkbook:
+    def __init__(self, path: Path):
+        self.path = Path(path)
+        self.cache = SheetCache(self.path)
+        self.mapping = None
+        names = self.cache.names()
+        if any(norm_key(n) == "MAPPINGDEF" for n in names):
+            mapping_name = next(n for n in names if norm_key(n) == "MAPPINGDEF")
+            try:
+                self.mapping = load_mapping(self.path) if mapping_name == "MAPPING DEF" else load_mapping(self.path)
+            except Exception:
+                try:
+                    self.mapping = load_mapping(self.path)
+                except Exception:
+                    self.mapping = None
+
+    def resolve(self, param) -> dict:
+        moc_key = norm_key(param.get("mml"))
+        if self.mapping and moc_key:
+            mo_known = (
+                moc_key in self.mapping["moc_to_sheet"]
+                or moc_key in self.mapping["attrs_by_moc"]
+                or moc_key in self.mapping["attrs_global"]
+            )
+            if mo_known:
+                resolved = resolve_parameter(param, self.mapping)
+                if resolved.get("reason") == "OK":
+                    return resolved
+        return resolve_by_sheet_name(param, self.cache.names(), self.cache)
+
+
+class InputStore:
+    def __init__(self, files: list[Path]):
+        self.workbooks = [InputWorkbook(path) for path in files]
+
+    def compare_param(self, param):
+        hits = []
+        last_resolved = {
+            "sheet": None,
+            "column": None,
+            "attr": None,
+            "bit": None,
+            "moc": None,
+            "reason": "Not found in any input file",
+        }
+        for wb in self.workbooks:
+            resolved = wb.resolve(param)
+            if resolved.get("reason") != "OK":
+                last_resolved = resolved
+                continue
+            result = compare_param(param, resolved, wb.cache)
+            if result["status"] == "Not Found in Configuration" and result["objects_checked"] == 0:
+                last_resolved = resolved
+                last_resolved["reason"] = result.get("remark") or resolved.get("reason")
+                continue
+            result["input_file"] = wb.path.name
+            result["resolved"] = resolved
+            hits.append((wb.path, resolved, result))
+        if not hits:
+            empty = {
+                "status": "Not Found in Configuration",
+                "objects_checked": 0,
+                "match_count": 0,
+                "mismatch_count": 0,
+                "missing_count": 0,
+                "unique_actuals": [],
+                "sample_mismatches": [],
+                "remark": last_resolved.get("reason") or "Not found in any input file",
+                "actual_source": "",
+                "input_files": "",
+            }
+            return last_resolved, empty
+        return merge_file_hits(param, hits)
+
+
+def merge_file_hits(param, hits):
+    primary_resolved = hits[0][1]
+    merged = {
+        "status": "",
+        "objects_checked": 0,
+        "match_count": 0,
+        "mismatch_count": 0,
+        "missing_count": 0,
+        "unique_actuals": [],
+        "sample_mismatches": [],
+        "remark": "",
+        "actual_source": "",
+        "input_files": ", ".join(path.name for path, _, _ in hits),
+    }
+    counts = Counter()
+    remarks = []
+    sources = []
+    for path, resolved, result in hits:
+        merged["objects_checked"] += result["objects_checked"]
+        merged["match_count"] += result["match_count"]
+        merged["mismatch_count"] += result["mismatch_count"]
+        merged["missing_count"] += result.get("missing_count") or 0
+        for value, count in result.get("unique_actuals") or []:
+            counts[f"{path.name}: {value}"] += count
+        for sample in result.get("sample_mismatches") or []:
+            if len(merged["sample_mismatches"]) < 12:
+                merged["sample_mismatches"].append(f"{path.name} | {sample}")
+        if result.get("remark"):
+            remarks.append(f"{path.name}: {result['remark']}")
+        if result.get("actual_source"):
+            sources.append(f"{path.name}: {result['actual_source']}")
+        if result.get("closest_bit") and "closest_bit" not in merged:
+            merged["closest_bit"] = result["closest_bit"]
+    merged["unique_actuals"] = counts.most_common(12)
+    merged["remark"] = " | ".join(remarks)
+    merged["actual_source"] = " | ".join(sources)
+    recommend = param.get("recommend")
+    if is_empty(recommend):
+        merged["status"] = "No Recommend Value"
+        merged["remark"] = merged["remark"] or (
+            "Reference recommend value is empty; parameter not audited for inconsistency"
+        )
+        return primary_resolved, merged
+    if merged["objects_checked"] == 0:
+        merged["status"] = "Not Found in Configuration"
+        return primary_resolved, merged
+    if merged["mismatch_count"] == 0:
+        merged["status"] = "Consistent"
+    elif merged["match_count"] == 0:
+        merged["status"] = "Inconsistent"
+    else:
+        merged["status"] = "Mixed / Partial"
+    pid = str(param.get("pid") or "").upper()
+    if pid == "DLARFCN" and merged["status"] == "Inconsistent":
+        merged["remark"] = (
+            "Recommend is a band name, but DlArfcn in the dump is a numeric ARFCN. "
+            f"Actual: {unique_actual_text(merged['unique_actuals'])}. "
+            "Check Frequency Band on the same MO."
+        )
+    elif pid == "FREQUENCYBAND" and merged["status"] == "Inconsistent":
+        merged["remark"] = (
+            "Recommend does not match Frequency Band in the dump. "
+            f"Actual: {unique_actual_text(merged['unique_actuals'])}. "
+            "Additional Frequency Band may be the intended NULL field."
+        )
+    elif merged["unique_actuals"] and str(merged["unique_actuals"][0][0]).split(": ", 1)[-1].startswith("<BIT_MISSING"):
+        extra = ""
+        if "closest_bit" in merged:
+            extra = f" Closest live bit key seen: {merged['closest_bit']}."
+        merged["remark"] = (
+            f"Bit {primary_resolved.get('bit')} is not present in the packed switch on "
+            f"{primary_resolved.get('sheet')} / {primary_resolved.get('column')} for this software version."
+            + extra
+        )
+    return primary_resolved, merged
 
 
 def unique_actual_text(unique_actuals):
@@ -696,17 +1139,45 @@ def summarize(params):
     func_summary = defaultdict(lambda: defaultdict(lambda: Counter()))
     for p in params:
         bucket = classify_bucket(p["result"]["status"])
-        summary[p["ref_sheet"]][bucket] += 1
+        key = p.get("sheet_key") or p["ref_sheet"]
+        summary[key][bucket] += 1
         summary["ALL"][bucket] += 1
-        func_summary[p["ref_sheet"]][p["function"]][bucket] += 1
-        func_summary[p["ref_sheet"]][p["function"]]["total"] += 1
-        summary[p["ref_sheet"]]["total"] += 1
+        func_summary[key][p["function"]][bucket] += 1
+        func_summary[key][p["function"]]["total"] += 1
+        summary[key]["total"] += 1
         summary["ALL"]["total"] += 1
         if bucket in {"full_inconsistent", "mixed"}:
-            summary[p["ref_sheet"]]["inconsistent"] += 1
+            summary[key]["inconsistent"] += 1
             summary["ALL"]["inconsistent"] += 1
-            func_summary[p["ref_sheet"]][p["function"]]["inconsistent"] += 1
+            func_summary[key][p["function"]]["inconsistent"] += 1
     return summary, func_summary
+
+
+def sheet_keys_in_order(params):
+    order = []
+    seen = set()
+    for p in params:
+        key = p.get("sheet_key") or p["ref_sheet"]
+        if key not in seen:
+            seen.add(key)
+            order.append(key)
+    return order
+
+
+def network_for_sheet(params, sheet_key):
+    for p in params:
+        if (p.get("sheet_key") or p["ref_sheet"]) == sheet_key:
+            return p.get("network") or ""
+    return ""
+
+
+def files_banner(run: RunContext) -> str:
+    refs = ", ".join(p.name for p in run.reference_files) or run.reference.name
+    inputs = ", ".join(p.name for p in run.input_files)
+    if not inputs:
+        names = [p.name for p in (run.cfg_4g, run.cfg_5g) if p]
+        inputs = ", ".join(names)
+    return f"Reference: {refs} | Input: {inputs} | Run {run.run_id}"
 
 
 def fill_header(ws, titles, fill, font):
@@ -758,17 +1229,20 @@ def write_excel(params, summary, func_summary, run: RunContext):
     ws["A1"] = "Parameter Inconsistency Overall Report"
     ws["A1"].font = title_font
     ws.merge_cells("A1:G1")
-    ws["A2"] = (
-        f"Reference: {run.reference.name} | "
-        f"Compared with {run.cfg_4g.name} (NR Anchor / 4G) and "
-        f"{run.cfg_5g.name} (NR Performance / 5G) | Run {run.run_id}"
-    )
+    ws["A2"] = files_banner(run)
     ws.merge_cells("A2:G2")
+    if run.input_folder or run.reference_folder:
+        ws["A3"] = (
+            f"Input Folder: {run.input_folder or '(files)'} | "
+            f"Reference Folder: {run.reference_folder or '(files)'} | "
+            f"Output Folder: {run.output_dir}"
+        )
+        ws.merge_cells("A3:J3")
 
-    ws["A4"] = "1.1 Overall Summary (both reference sheets)"
+    ws["A4"] = "1.1 Overall Summary (every reference file / sheet vs every input file)"
     ws["A4"].font = section_font
     headers = [
-        "Reference Sheet",
+        "Reference File / Sheet",
         "Network",
         "Total Parameters",
         "Inconsistent (total)",
@@ -790,11 +1264,9 @@ def write_excel(params, summary, func_summary, run: RunContext):
             return "N/A"
         return f"{counter['inconsistent'] / auditable:.1%}"
 
-    rows = [
-        ("NR Performance", "5G", summary["NR Performance"]),
-        ("NR Anchor", "4G", summary["NR Anchor"]),
-        ("BOTH SHEETS", "4G+5G", summary["ALL"]),
-    ]
+    keys = sheet_keys_in_order(params)
+    rows = [(key, network_for_sheet(params, key), summary[key]) for key in keys]
+    rows.append(("ALL FILES / SHEETS", "ALL", summary["ALL"]))
     for idx, (name, net, counter) in enumerate(rows, start=6):
         values = [
             name,
@@ -811,27 +1283,32 @@ def write_excel(params, summary, func_summary, run: RunContext):
         for col, val in enumerate(values, start=1):
             cell = ws.cell(idx, col, val)
             cell.border = thin
-            if idx == 8:
+            if name == "ALL FILES / SHEETS":
                 cell.font = Font(bold=True)
             if col == 4 and counter["inconsistent"]:
                 cell.fill = PatternFill("solid", fgColor="FFC7CE")
 
-    ws["A10"] = "Notes"
-    ws["A10"].font = section_font
-    ws["A11"] = (
+    note_row = 6 + len(rows) + 1
+    ws.cell(note_row, 1, "Notes").font = section_font
+    ws.cell(
+        note_row + 1,
+        1,
+        "Every workbook in the Input Folder is compared against every workbook in the Reference Folder. "
         "Auditable parameters = parameters that have a Recommend Value and were found in configuration. "
         "Inconsistent (total) = Full Inconsistent + Mixed/Partial. "
         "Full Inconsistent = every object differs from recommend. "
         "Mixed/Partial = some cells/sites match and others do not. "
-        "Parameters with empty Recommend Value are listed but not counted as inconsistency."
+        "Parameters with empty Recommend Value are listed but not counted as inconsistency. "
+        f"Excel sheet limit (Microsoft): {EXCEL_MAX_ROWS:,} rows x {EXCEL_MAX_COLS:,} columns. "
+        "This tool does not add a lower file, sheet, or column cap.",
     )
-    ws.merge_cells("A11:J12")
-    ws["A11"].alignment = Alignment(wrap_text=True, vertical="top")
+    ws.merge_cells(start_row=note_row + 1, start_column=1, end_row=note_row + 2, end_column=10)
+    ws.cell(note_row + 1, 1).alignment = Alignment(wrap_text=True, vertical="top")
 
-    ws["A14"] = "1.2 Function-wise Summary for individual sheet"
-    ws["A14"].font = section_font
+    func_title_row = note_row + 4
+    ws.cell(func_title_row, 1, "1.2 Function-wise Summary for individual sheet").font = section_font
     func_headers = [
-        "Reference Sheet",
+        "Reference File / Sheet",
         "Function",
         "Total Parameters",
         "Inconsistent (total)",
@@ -843,11 +1320,11 @@ def write_excel(params, summary, func_summary, run: RunContext):
         "Inconsistency Rate (auditable)",
     ]
     for col, title in enumerate(func_headers, start=1):
-        cell = ws.cell(16, col, title)
+        cell = ws.cell(func_title_row + 2, col, title)
         cell.fill = header_fill
         cell.font = header_font
-    r = 17
-    for sheet_name in ["NR Performance", "NR Anchor"]:
+    r = func_title_row + 3
+    for sheet_name in keys:
         functions = sorted(func_summary[sheet_name].keys())
         for func in functions:
             counter = func_summary[sheet_name][func]
@@ -874,7 +1351,7 @@ def write_excel(params, summary, func_summary, run: RunContext):
     ws.cell(r, 1, "1.3 Material inconsistencies (mismatch count >= 10 or 100% mismatch)").font = section_font
     r += 1
     mat_headers = [
-        "Reference Sheet",
+        "Reference File / Sheet",
         "Function",
         "Parameter ID",
         "Recommend",
@@ -903,7 +1380,7 @@ def write_excel(params, summary, func_summary, run: RunContext):
         res = p["result"]
         mismatch_pct = res["mismatch_count"] / res["objects_checked"] if res["objects_checked"] else 0
         values = [
-            p["ref_sheet"],
+            p.get("sheet_key") or p["ref_sheet"],
             p["function"],
             p["pid"],
             "" if p["recommend"] is None else p["recommend"],
@@ -930,6 +1407,7 @@ def write_excel(params, summary, func_summary, run: RunContext):
     ws2["A1"] = "All Parameter-wise Report (function wise)"
     ws2["A1"].font = title_font
     param_headers = [
+        "Reference File",
         "Reference Sheet",
         "Network",
         "Function",
@@ -937,6 +1415,7 @@ def write_excel(params, summary, func_summary, run: RunContext):
         "Parameter ID",
         "Recommend Value",
         "Status",
+        "Input File(s)",
         "Config Sheet",
         "Config Column",
         "Bit Name",
@@ -956,7 +1435,7 @@ def write_excel(params, summary, func_summary, run: RunContext):
     ws2.row_dimensions[3].height = 32
     ordered = sorted(
         params,
-        key=lambda p: (p["ref_sheet"], p["function"], p["mml"], p["pid"]),
+        key=lambda p: (p.get("ref_file") or "", p["ref_sheet"], p["function"], p["mml"], p["pid"]),
     )
     r = 4
     for p in ordered:
@@ -966,13 +1445,15 @@ def write_excel(params, summary, func_summary, run: RunContext):
         if res["objects_checked"] and not is_empty(p["recommend"]):
             match_pct = f"{res['match_count'] / res['objects_checked']:.1%}"
         values = [
+            p.get("ref_file") or run.reference.name,
             p["ref_sheet"],
-            p["network"],
+            p.get("network") or "",
             p["function"],
             p["mml"],
             p["pid"],
             "" if p["recommend"] is None else p["recommend"],
             res["status"],
+            res.get("input_files") or "",
             resolved.get("sheet") or "",
             resolved.get("column") or "",
             resolved.get("bit") or "",
@@ -988,29 +1469,28 @@ def write_excel(params, summary, func_summary, run: RunContext):
             cell = ws2.cell(r, col, val)
             cell.border = thin
             cell.alignment = Alignment(wrap_text=True, vertical="top")
-            if col == 7:
+            if col == 8:
                 cell.fill = status_fill(res["status"])
         r += 1
     ws2.freeze_panes = "A4"
-    ws2.auto_filter.ref = f"A3:Q{r-1}"
+    ws2.auto_filter.ref = f"A3:S{max(r-1, 3)}"
     autosize(ws2, 36)
-    ws2.column_dimensions["E"].width = 42
-    ws2.column_dimensions["O"].width = 50
-    ws2.column_dimensions["P"].width = 45
+    ws2.column_dimensions["F"].width = 42
+    ws2.column_dimensions["Q"].width = 50
+    ws2.column_dimensions["R"].width = 45
 
     # 3. Sheet wise
     ws3 = wb.create_sheet("3_Sheet_Wise_Report")
     ws3["A1"] = "Sheet-wise Report"
     ws3["A1"].font = title_font
     row = 3
-    for sheet_name, network, cfg_name in [
-        ("NR Performance", "5G", run.cfg_5g.name),
-        ("NR Anchor", "4G", run.cfg_4g.name),
-    ]:
+    for sheet_name in keys:
+        network = network_for_sheet(params, sheet_name)
         counter = summary[sheet_name]
-        ws3.cell(row, 1, f"{sheet_name}  ({network})").font = section_font
+        title = f"{sheet_name}" + (f"  ({network})" if network else "")
+        ws3.cell(row, 1, title).font = section_font
         row += 1
-        ws3.cell(row, 1, f"Source configuration: {cfg_name}")
+        ws3.cell(row, 1, f"Compared against all input files: {', '.join(p.name for p in run.input_files)}")
         row += 1
         stats = [
             ("Total reference parameters", counter["total"]),
@@ -1056,7 +1536,7 @@ def write_excel(params, summary, func_summary, run: RunContext):
         ws3.cell(row, 1, f"Inconsistent parameters in {sheet_name}").font = section_font
         row += 1
         for col, title in enumerate(
-            ["Function", "MML Object", "Parameter ID", "Recommend", "Status", "Actual (top)", "Mismatch Count"],
+            ["Function", "MML Object", "Parameter ID", "Recommend", "Status", "Actual (top)", "Mismatch Count", "Input File(s)"],
             start=1,
         ):
             cell = ws3.cell(row, col, title)
@@ -1066,7 +1546,7 @@ def write_excel(params, summary, func_summary, run: RunContext):
         sheet_params = [
             p
             for p in ordered
-            if p["ref_sheet"] == sheet_name and is_inconsistent(p["result"]["status"])
+            if (p.get("sheet_key") or p["ref_sheet"]) == sheet_name and is_inconsistent(p["result"]["status"])
         ]
         if not sheet_params:
             ws3.cell(row, 1, "None")
@@ -1080,6 +1560,7 @@ def write_excel(params, summary, func_summary, run: RunContext):
                 p["result"]["status"],
                 unique_actual_text(p["result"]["unique_actuals"]),
                 p["result"]["mismatch_count"],
+                p["result"].get("input_files") or "",
             ]
             for col, val in enumerate(vals, start=1):
                 cell = ws3.cell(row, col, val)
@@ -1098,18 +1579,21 @@ def write_excel(params, summary, func_summary, run: RunContext):
     ws4["A1"] = "Final Summary"
     ws4["A1"].font = title_font
     all_c = summary["ALL"]
-    nrp = summary["NR Performance"]
-    nra = summary["NR Anchor"]
     inconsistent_params = [p for p in ordered if is_inconsistent(p["result"]["status"])]
     consistent_params = [p for p in ordered if p["result"]["status"] == "Consistent"]
     not_found = [p for p in ordered if p["result"]["status"] == "Not Found in Configuration"]
     no_rec = [p for p in ordered if p["result"]["status"] == "No Recommend Value"]
 
+    ref_names = ", ".join(p.name for p in run.reference_files) or run.reference.name
+    in_names = ", ".join(p.name for p in run.input_files)
     lines = [
         f"Audit date: {run.audit_date}",
         f"Run ID: {run.run_id}",
-        f"Baseline: {run.reference.name} (sheets NR Performance, NR Anchor)",
-        f"Live data: {run.cfg_4g.name} and {run.cfg_5g.name}",
+        f"Reference Folder: {run.reference_folder or '(selected files)'}",
+        f"Reference files ({len(run.reference_files)}): {ref_names}",
+        f"Input Folder: {run.input_folder or '(selected files)'}",
+        f"Input files ({len(run.input_files)}): {in_names}",
+        f"Output Folder: {run.output_dir}",
         "",
         "HEADLINE",
         f"- Total reference parameters checked: {all_c['total']}",
@@ -1121,17 +1605,22 @@ def write_excel(params, summary, func_summary, run: RunContext):
         f"- Combined auditable inconsistency rate: {auditable_rate(all_c)}",
         "",
         "BY REFERENCE SHEET",
-        f"- NR Performance (5G): {nrp['total']} parameters; {nrp['inconsistent']} inconsistent; "
-        f"{nrp['consistent']} consistent; {nrp['not_found']} not found; {nrp['no_recommend']} no recommend; "
-        f"auditable rate {auditable_rate(nrp)}",
-        f"- NR Anchor (4G): {nra['total']} parameters; {nra['inconsistent']} inconsistent; "
-        f"{nra['consistent']} consistent; {nra['not_found']} not found; {nra['no_recommend']} no recommend; "
-        f"auditable rate {auditable_rate(nra)}",
+    ]
+    for sheet_name in keys:
+        c = summary[sheet_name]
+        net = network_for_sheet(params, sheet_name)
+        net_txt = f" ({net})" if net else ""
+        lines.append(
+            f"- {sheet_name}{net_txt}: {c['total']} parameters; {c['inconsistent']} inconsistent; "
+            f"{c['consistent']} consistent; {c['not_found']} not found; {c['no_recommend']} no recommend; "
+            f"auditable rate {auditable_rate(c)}"
+        )
+    lines += [
         "",
         "FUNCTION HOTSPOTS",
     ]
     hotspots = []
-    for sheet_name in ["NR Performance", "NR Anchor"]:
+    for sheet_name in keys:
         for func, c in func_summary[sheet_name].items():
             if c["inconsistent"]:
                 hotspots.append((c["inconsistent"], sheet_name, func, c["total"]))
@@ -1142,11 +1631,13 @@ def write_excel(params, summary, func_summary, run: RunContext):
     lines += [
         "",
         "INTERPRETATION",
-        "- NR Performance is compared against the 5G configuration workbook (gNodeB / NR DU cell MOs).",
-        "- NR Anchor is compared against the 4G configuration workbook (eNodeB NSA anchoring / SCG / ANR MOs).",
+        "- Every reference workbook is fully analyzed. Every input workbook is searched for each parameter.",
+        "- Sheet names in input dumps that match an MO / MML Object name are treated as that object.",
+        "- Huawei dumps with a MAPPING DEF sheet are mapped by MOC/attribute; other workbooks use sheet and column names.",
         "- Switch bits (ParameterID format BIT@Attribute or Attribute@BIT) are extracted from Huawei bit-pack strings (NAME-1&NAME-0).",
         "- Mixed / Partial means some cells or sites match the recommend value and others do not; these are counted as inconsistency.",
         "- Empty Recommend Value in the reference file cannot be judged; they are excluded from the inconsistency rate.",
+        f"- Microsoft Excel limit: {EXCEL_MAX_ROWS:,} rows and {EXCEL_MAX_COLS:,} columns per sheet. This tool does not add a lower cap.",
         "",
         f"See sheet 2_All_Parameter_Report for the full {all_c['total']} parameter lines, "
         f"and sheet 3_Sheet_Wise_Report for the inconsistent list of each reference sheet.",
@@ -1206,30 +1697,38 @@ def write_markdown(params, summary, func_summary, extras, run: RunContext):
         return f"{counter['inconsistent'] / auditable:.1%}"
 
     all_c = summary["ALL"]
-    nrp = summary["NR Performance"]
-    nra = summary["NR Anchor"]
+    keys = sheet_keys_in_order(params)
+    ref_names = ", ".join(f"`{p.name}`" for p in run.reference_files) or f"`{run.reference.name}`"
+    in_names = ", ".join(f"`{p.name}`" for p in run.input_files)
     lines = []
     lines.append(f"# Parameter Inconsistency Report ({run.audit_date})")
     lines.append("")
     lines.append(f"Run ID: `{run.run_id}`")
-    lines.append(f"Baseline: `{run.reference.name}`")
-    lines.append(f"Compared with: `{run.cfg_4g.name}` and `{run.cfg_5g.name}`")
+    lines.append(f"Reference files: {ref_names}")
+    lines.append(f"Input files: {in_names}")
+    if run.input_folder:
+        lines.append(f"Input Folder: `{run.input_folder}`")
+    if run.reference_folder:
+        lines.append(f"Reference Folder: `{run.reference_folder}`")
+    lines.append(f"Output Folder: `{run.output_dir}`")
     lines.append("")
     lines.append("## 1. Overall Report")
     lines.append("")
-    lines.append("### 1.1 How many parameter inconsistencies from both sheets")
+    lines.append("### 1.1 How many parameter inconsistencies from all reference sheets")
     lines.append("")
-    lines.append("| Reference Sheet | Network | Total | Inconsistent | Full | Mixed | Consistent | Not Found | No Recommend | Auditable Inconsistency Rate |")
+    lines.append("| Reference File / Sheet | Network | Total | Inconsistent | Full | Mixed | Consistent | Not Found | No Recommend | Auditable Inconsistency Rate |")
     lines.append("|---|---|---:|---:|---:|---:|---:|---:|---:|---|")
-    for name, net, c in [
-        ("NR Performance", "5G", nrp),
-        ("NR Anchor", "4G", nra),
-        ("BOTH SHEETS", "4G+5G", all_c),
-    ]:
+    for name in keys:
+        net = network_for_sheet(params, name)
+        c = summary[name]
         lines.append(
             f"| {name} | {net} | {c['total']} | {c['inconsistent']} | {c['full_inconsistent']} | {c['mixed']} | "
             f"{c['consistent']} | {c['not_found']} | {c['no_recommend']} | {rate(c)} |"
         )
+    lines.append(
+        f"| ALL FILES / SHEETS | ALL | {all_c['total']} | {all_c['inconsistent']} | {all_c['full_inconsistent']} | {all_c['mixed']} | "
+        f"{all_c['consistent']} | {all_c['not_found']} | {all_c['no_recommend']} | {rate(all_c)} |"
+    )
     lines.append("")
     lines.append(
         f"**Headline:** {all_c['inconsistent']} of {all_c['total']} reference parameters are inconsistent "
@@ -1241,7 +1740,7 @@ def write_markdown(params, summary, func_summary, extras, run: RunContext):
     lines.append("")
     lines.append("### 1.2 Function-wise Summary for individual sheet")
     lines.append("")
-    for sheet_name in ["NR Performance", "NR Anchor"]:
+    for sheet_name in keys:
         lines.append(f"#### {sheet_name}")
         lines.append("")
         lines.append("| Function | Total | Inconsistent | Full | Mixed | Consistent | Not Found | No Recommend | Rate |")
@@ -1275,7 +1774,7 @@ def write_markdown(params, summary, func_summary, extras, run: RunContext):
         rec = "" if p["recommend"] is None else str(p["recommend"])
         actual = unique_actual_text(res["unique_actuals"]).replace("|", "/")
         lines.append(
-            f"| {p['ref_sheet']} | {p['function']} | `{p['pid']}` | {rec} | {res['status']} | "
+            f"| {p.get('sheet_key') or p['ref_sheet']} | {p['function']} | `{p['pid']}` | {rec} | {res['status']} | "
             f"{res['mismatch_count']}/{res['objects_checked']} | {mismatch_pct:.1%} | {actual} |"
         )
     lines.append("")
@@ -1285,13 +1784,13 @@ def write_markdown(params, summary, func_summary, extras, run: RunContext):
     lines.append(f"Full line-by-line table is in `{run.out_xlsx}` sheet `2_All_Parameter_Report`.")
     lines.append("Below: every parameter grouped by reference sheet and function.")
     lines.append("")
-    ordered = sorted(params, key=lambda p: (p["ref_sheet"], p["function"], p["mml"], p["pid"]))
+    ordered = sorted(params, key=lambda p: (p.get("ref_file") or "", p["ref_sheet"], p["function"], p["mml"], p["pid"]))
     current = None
     for p in ordered:
-        key = (p["ref_sheet"], p["function"])
+        key = (p.get("sheet_key") or p["ref_sheet"], p["function"])
         if key != current:
             current = key
-            lines.append(f"### {p['ref_sheet']} — {p['function']}")
+            lines.append(f"### {p.get('sheet_key') or p['ref_sheet']} — {p['function']}")
             lines.append("")
             lines.append("| Parameter ID | MML Object | Recommend | Status | Match | Mismatch | Actual (top) |")
             lines.append("|---|---|---|---|---:|---:|---|")
@@ -1305,9 +1804,11 @@ def write_markdown(params, summary, func_summary, extras, run: RunContext):
 
     lines.append("## 3. Sheet-wise Report")
     lines.append("")
-    for sheet_name, network in [("NR Performance", "5G"), ("NR Anchor", "4G")]:
+    for sheet_name in keys:
         c = summary[sheet_name]
-        lines.append(f"### {sheet_name} ({network})")
+        network = network_for_sheet(params, sheet_name)
+        heading = f"{sheet_name} ({network})" if network else sheet_name
+        lines.append(f"### {heading}")
         lines.append("")
         lines.append(f"- Total parameters: **{c['total']}**")
         lines.append(f"- Inconsistent: **{c['inconsistent']}**")
@@ -1323,7 +1824,7 @@ def write_markdown(params, summary, func_summary, extras, run: RunContext):
         sheet_incon = [
             p
             for p in ordered
-            if p["ref_sheet"] == sheet_name and is_inconsistent(p["result"]["status"])
+            if (p.get("sheet_key") or p["ref_sheet"]) == sheet_name and is_inconsistent(p["result"]["status"])
         ]
         if not sheet_incon:
             lines.append("| — | — | — | None | 0 | — |")
@@ -1338,13 +1839,16 @@ def write_markdown(params, summary, func_summary, extras, run: RunContext):
 
     lines.append("## 4. Final Summary")
     lines.append("")
+    sheet_bits = []
+    for sheet_name in keys:
+        c = summary[sheet_name]
+        sheet_bits.append(f"{sheet_name}: {c['inconsistent']} inconsistent of {c['total']}")
     lines.append(
-        f"The reference file contains **{all_c['total']}** parameters across two sheets. "
-        f"**{all_c['inconsistent']}** parameters are inconsistent against live 4G/5G configuration "
+        f"The reference files contain **{all_c['total']}** parameters. "
+        f"**{all_c['inconsistent']}** parameters are inconsistent against the input configuration dumps "
         f"({all_c['full_inconsistent']} fully mismatched, {all_c['mixed']} mixed). "
-        f"NR Performance / 5G: {nrp['inconsistent']} inconsistent of {nrp['total']}. "
-        f"NR Anchor / 4G: {nra['inconsistent']} inconsistent of {nra['total']}. "
-        f"**{all_c['consistent']}** parameters fully match the recommend value. "
+        + (" ".join(sheet_bits) + ". " if sheet_bits else "")
+        + f"**{all_c['consistent']}** parameters fully match the recommend value. "
         f"**{all_c['no_recommend']}** parameters have no recommend value in the reference and were excluded "
         f"from the inconsistency rate. **{all_c['not_found']}** parameters could not be mapped to the dumps."
     )
@@ -1362,6 +1866,7 @@ def write_markdown(params, summary, func_summary, extras, run: RunContext):
 def write_parameter_csv(params, run: RunContext):
     fieldnames = [
         "run_id",
+        "reference_file",
         "reference_sheet",
         "network",
         "function",
@@ -1369,6 +1874,7 @@ def write_parameter_csv(params, run: RunContext):
         "parameter_id",
         "recommend_value",
         "status",
+        "input_files",
         "config_sheet",
         "config_column",
         "bit_name",
@@ -1387,13 +1893,15 @@ def write_parameter_csv(params, run: RunContext):
             writer.writerow(
                 {
                     "run_id": run.run_id,
+                    "reference_file": p.get("ref_file") or run.reference.name,
                     "reference_sheet": p["ref_sheet"],
-                    "network": p["network"],
+                    "network": p.get("network") or "",
                     "function": p["function"],
                     "mml_object": p["mml"],
                     "parameter_id": p["pid"],
                     "recommend_value": "" if p["recommend"] is None else p["recommend"],
                     "status": res["status"],
+                    "input_files": res.get("input_files") or "",
                     "config_sheet": resolved.get("sheet") or "",
                     "config_column": resolved.get("column") or "",
                     "bit_name": resolved.get("bit") or "",
@@ -1417,14 +1925,16 @@ def write_run_summary(summary, run: RunContext, param_count: int):
     payload = {
         "run_id": run.run_id,
         "audit_date": run.audit_date,
-        "reference": str(run.reference),
-        "config_4g": str(run.cfg_4g),
-        "config_5g": str(run.cfg_5g),
+        "input_folder": str(run.input_folder) if run.input_folder else None,
+        "reference_folder": str(run.reference_folder) if run.reference_folder else None,
+        "output_folder": str(run.output_dir),
+        "reference_files": [str(p) for p in run.reference_files],
+        "input_files": [str(p) for p in run.input_files],
         "parameter_count": param_count,
         "overall": dict(summary["ALL"]),
-        "nr_performance": dict(summary["NR Performance"]),
-        "nr_anchor": dict(summary["NR Anchor"]),
+        "sheets": {key: dict(counter) for key, counter in summary.items() if key != "ALL"},
         "auditable_inconsistency_rate": rate_text(summary["ALL"]),
+        "excel_limits_note": f"{EXCEL_MAX_ROWS} rows x {EXCEL_MAX_COLS} columns per sheet (Microsoft Excel). No extra cap in this tool.",
         "outputs": {
             "xlsx": str(run.out_xlsx),
             "md": str(run.out_md),
@@ -1437,14 +1947,11 @@ def write_run_summary(summary, run: RunContext, param_count: int):
 
 def append_history(summary, run: RunContext):
     all_c = summary["ALL"]
-    nrp = summary["NR Performance"]
-    nra = summary["NR Anchor"]
     fieldnames = [
         "run_id",
         "audit_date",
-        "reference",
-        "config_4g",
-        "config_5g",
+        "reference_files",
+        "input_files",
         "total",
         "inconsistent",
         "full_inconsistent",
@@ -1453,8 +1960,6 @@ def append_history(summary, run: RunContext):
         "not_found",
         "no_recommend",
         "auditable_rate",
-        "nr_performance_inconsistent",
-        "nr_anchor_inconsistent",
         "report_xlsx",
     ]
     new_file = not run.history_csv.exists()
@@ -1470,9 +1975,8 @@ def append_history(summary, run: RunContext):
             {
                 "run_id": run.run_id,
                 "audit_date": run.audit_date,
-                "reference": run.reference.name,
-                "config_4g": run.cfg_4g.name,
-                "config_5g": run.cfg_5g.name,
+                "reference_files": "; ".join(p.name for p in run.reference_files) or run.reference.name,
+                "input_files": "; ".join(p.name for p in run.input_files),
                 "total": all_c["total"],
                 "inconsistent": all_c["inconsistent"],
                 "full_inconsistent": all_c["full_inconsistent"],
@@ -1481,8 +1985,6 @@ def append_history(summary, run: RunContext):
                 "not_found": all_c["not_found"],
                 "no_recommend": all_c["no_recommend"],
                 "auditable_rate": rate_text(all_c),
-                "nr_performance_inconsistent": nrp["inconsistent"],
-                "nr_anchor_inconsistent": nra["inconsistent"],
                 "report_xlsx": report_path,
             }
         )
@@ -1490,21 +1992,22 @@ def append_history(summary, run: RunContext):
 
 def parse_args(argv=None):
     parser = argparse.ArgumentParser(
-        description="Compare Reference Parameter workbook with 4G and 5G configuration dumps. "
-        "Pass several workbooks in any order, or launch the GUI with no arguments."
+        description="Compare every reference workbook with every input dump. "
+        "Use three folders (Input, Reference, Output), or launch the GUI with no arguments."
     )
     parser.add_argument(
         "files",
         nargs="*",
         type=Path,
-        help="Input workbooks: Reference + 4G dump + 5G dump (any order, any names)",
+        help="Optional workbooks (legacy). Prefer --input-folder and --reference-folder.",
     )
-    parser.add_argument("--input-dir", type=Path, default=DEFAULT_INPUT_DIR, help="Folder to drop new dumps into")
-    parser.add_argument("-o", "--output-dir", type=Path, default=DEFAULT_OUTPUT_DIR, help="Report output folder")
+    parser.add_argument("--input-folder", "--input-dir", dest="input_folder", type=Path, default=None, help="Folder of configuration dumps (any names)")
+    parser.add_argument("--reference-folder", dest="reference_folder", type=Path, default=None, help="Folder of reference / plan-value workbooks (any names)")
+    parser.add_argument("-o", "--output-dir", "--output-folder", dest="output_dir", type=Path, default=DEFAULT_OUTPUT_DIR, help="Output folder for reports")
     parser.add_argument("--config", type=Path, default=DEFAULT_CONFIG, help="Optional JSON config with file patterns")
-    parser.add_argument("--reference", type=Path, help="Reference Parameter xlsx (optional; auto-detected)")
-    parser.add_argument("--config-4g", type=Path, help="4G configuration xlsb/xlsx (optional; auto-detected)")
-    parser.add_argument("--config-5g", type=Path, help="5G configuration xlsb/xlsx (optional; auto-detected)")
+    parser.add_argument("--reference", type=Path, help="Single reference workbook (legacy)")
+    parser.add_argument("--config-4g", type=Path, help="Single 4G dump (legacy)")
+    parser.add_argument("--config-5g", type=Path, help="Single 5G dump (legacy)")
     parser.add_argument("--run-id", help="Optional run id; default is timestamp YYYYMMDD_HHMMSS")
     parser.add_argument("--list-inputs", action="store_true", help="Show detected input files and exit")
     parser.add_argument("--gui", action="store_true", help="Open the graphical tool")
@@ -1525,42 +2028,79 @@ def resolve_required_file(label: str, explicit: Path | None, discovered: Path | 
     return path.resolve()
 
 
-def execute_audit(reference: Path, cfg_4g: Path, cfg_5g: Path, output_dir: Path, run_id=None, progress=print):
+def execute_folder_audit(
+    output_dir: Path,
+    input_folder: Path | None = None,
+    reference_folder: Path | None = None,
+    input_files=None,
+    reference_files=None,
+    run_id=None,
+    progress=print,
+):
+    input_files = [Path(p).expanduser().resolve() for p in (input_files or [])]
+    reference_files = [Path(p).expanduser().resolve() for p in (reference_files or [])]
+    if not input_files:
+        input_files = list_workbooks(input_folder)
+    if not reference_files:
+        reference_files = list_workbooks(reference_folder)
+    if not input_files:
+        raise FileNotFoundError(
+            "Input Folder has no Excel workbooks (.xlsx / .xlsb / .xlsm). "
+            "Put 4G dump, 5G dump, 2G dump, or any other configuration files there."
+        )
+    if not reference_files:
+        raise FileNotFoundError(
+            "Reference Folder has no Excel workbooks (.xlsx / .xlsb / .xlsm). "
+            "Put every recommended/plan-value file there."
+        )
+
+    guessed_4g = next((p for p in input_files if guess_file_role(p) == "4g"), input_files[0])
+    guessed_5g = next((p for p in input_files if guess_file_role(p) == "5g"), input_files[-1])
     run = build_run_context(
         root=ROOT,
-        reference=Path(reference).resolve(),
-        cfg_4g=Path(cfg_4g).resolve(),
-        cfg_5g=Path(cfg_5g).resolve(),
+        reference=reference_files[0],
+        cfg_4g=guessed_4g,
+        cfg_5g=guessed_5g,
         output_dir=Path(output_dir),
         run_id=run_id,
+        input_folder=input_folder,
+        reference_folder=reference_folder,
+        input_files=input_files,
+        reference_files=reference_files,
     )
     progress(f"Run ID: {run.run_id}")
-    progress(f"Reference: {run.reference}")
-    progress(f"4G config: {run.cfg_4g}")
-    progress(f"5G config: {run.cfg_5g}")
-    progress("Loading reference parameters...")
-    params = load_reference(run.reference)
-    progress(f"  {len(params)} parameters")
-    progress("Loading mapping definitions...")
-    maps = {
-        "5G": load_mapping(run.cfg_5g),
-        "4G": load_mapping(run.cfg_4g),
-    }
-    caches = {
-        "5G": SheetCache(run.cfg_5g),
-        "4G": SheetCache(run.cfg_4g),
-    }
-    progress("Resolving and comparing...")
+    progress(f"Reference Folder: {run.reference_folder or '(files)'}")
+    for path in reference_files:
+        progress(f"  REF  {path.name}")
+    progress(f"Input Folder: {run.input_folder or '(files)'}")
+    for path in input_files:
+        progress(f"  IN   {path.name}")
+    progress(f"Output Folder: {run.output_dir}")
+    progress("Loading reference parameters from every reference workbook...")
+    params, missing_ref_sheets = load_all_references(reference_files)
+    if missing_ref_sheets:
+        progress(
+            "  No parameter rows detected in: "
+            + ", ".join(missing_ref_sheets)
+            + " (need Parameter ID + Recommend Value or MML Object columns)"
+        )
+    progress(f"  {len(params)} parameters from {len(reference_files)} reference file(s)")
+    if not params:
+        raise ValueError(
+            "No reference parameters found. Each reference sheet needs headers such as "
+            "Function / MML Object / Parameter ID / Recommend Value (names can vary)."
+        )
+    progress("Indexing every input workbook (MAPPING DEF and/or sheet name as MO)...")
+    store = InputStore(input_files)
+    progress("Resolving and comparing each reference parameter against all input files...")
     for i, param in enumerate(params, start=1):
-        mapping = maps[param["network"]]
-        resolved = resolve_parameter(param, mapping)
-        result = compare_param(param, resolved, caches[param["network"]])
+        resolved, result = store.compare_param(param)
         param["resolved"] = resolved
         param["result"] = result
         if i % 40 == 0:
             progress(f"  {i}/{len(params)}")
     summary, func_summary = summarize(params)
-    progress("Writing reports...")
+    progress("Writing reports to the Output Folder...")
     extras = write_excel(params, summary, func_summary, run)
     write_markdown(params, summary, func_summary, extras, run)
     write_parameter_csv(params, run)
@@ -1576,14 +2116,32 @@ def execute_audit(reference: Path, cfg_4g: Path, cfg_5g: Path, output_dir: Path,
     return run, summary, extras
 
 
+def execute_audit(reference: Path, cfg_4g: Path, cfg_5g: Path, output_dir: Path, run_id=None, progress=print):
+    return execute_folder_audit(
+        output_dir=output_dir,
+        input_files=[cfg_4g, cfg_5g],
+        reference_files=[reference],
+        run_id=run_id,
+        progress=progress,
+    )
+
+
 def main(argv=None):
     args = parse_args(argv)
     cfg = load_audit_config(args.config)
-    discovered = discover_inputs(ROOT, args.input_dir, cfg)
+    input_folder = args.input_folder or DEFAULT_INPUT_DIR
+    reference_folder = args.reference_folder or DEFAULT_REFERENCE_DIR
+    discovered = discover_inputs(ROOT, input_folder, cfg)
     from_files = classify_input_files(args.files) if args.files else None
 
     if args.list_inputs:
-        print("Search folders:")
+        print("Input Folder:", input_folder)
+        for path in list_workbooks(input_folder):
+            print(f"  IN   {path}")
+        print("Reference Folder:", reference_folder)
+        for path in list_workbooks(reference_folder):
+            print(f"  REF  {path}")
+        print("Search folders (legacy detect):")
         for folder in discovered["search_dirs"]:
             print(f"  {folder}")
         if from_files:
@@ -1593,50 +2151,66 @@ def main(argv=None):
             print(f"  5G config: {from_files['cfg_5g']}")
             if from_files["unknown"]:
                 print(f"  Unclassified: {from_files['unknown']}")
-        print(f"Reference: {discovered['reference']}")
-        print(f"4G config: {discovered['cfg_4g']}")
-        print(f"5G config: {discovered['cfg_5g']}")
+        print(f"Legacy Reference: {discovered['reference']}")
+        print(f"Legacy 4G config: {discovered['cfg_4g']}")
+        print(f"Legacy 5G config: {discovered['cfg_5g']}")
         return 0
 
+    folder_inputs = list_workbooks(input_folder)
+    folder_refs = list_workbooks(reference_folder)
+    use_folders = bool(args.input_folder or args.reference_folder or (folder_inputs and folder_refs))
+
     try:
-        reference = resolve_required_file(
-            "Reference Parameter workbook",
-            args.reference or (from_files["reference"] if from_files else None),
-            None if from_files else discovered["reference"],
-        )
-        cfg_4g = resolve_required_file(
-            "4G configuration dump",
-            args.config_4g or (from_files["cfg_4g"] if from_files else None),
-            None if from_files else discovered["cfg_4g"],
-        )
-        cfg_5g = resolve_required_file(
-            "5G configuration dump",
-            args.config_5g or (from_files["cfg_5g"] if from_files else None),
-            None if from_files else discovered["cfg_5g"],
-        )
-    except FileNotFoundError as exc:
+        if use_folders and folder_inputs and folder_refs and not args.files and not args.reference:
+            run, summary, extras = execute_folder_audit(
+                output_dir=args.output_dir,
+                input_folder=input_folder,
+                reference_folder=reference_folder,
+                run_id=args.run_id,
+            )
+        else:
+            extra_inputs = []
+            extra_refs = []
+            if from_files:
+                extra_refs.extend(from_files.get("all_reference") or [])
+                extra_inputs.extend(from_files.get("all_4g") or [])
+                extra_inputs.extend(from_files.get("all_5g") or [])
+                extra_inputs.extend(from_files.get("unknown") or [])
+            reference = args.reference
+            if reference:
+                extra_refs.append(Path(reference))
+            if args.config_4g:
+                extra_inputs.append(Path(args.config_4g))
+            if args.config_5g:
+                extra_inputs.append(Path(args.config_5g))
+            if not extra_refs:
+                extra_refs = folder_refs or ([discovered["reference"]] if discovered["reference"] else [])
+            if not extra_inputs:
+                extra_inputs = folder_inputs
+                if not extra_inputs:
+                    extra_inputs = [p for p in (discovered["cfg_4g"], discovered["cfg_5g"]) if p]
+            extra_refs = unique_files(extra_refs)
+            extra_inputs = unique_files(extra_inputs)
+            run, summary, extras = execute_folder_audit(
+                output_dir=args.output_dir,
+                input_folder=args.input_folder,
+                reference_folder=args.reference_folder,
+                input_files=extra_inputs,
+                reference_files=extra_refs,
+                run_id=args.run_id,
+            )
+    except (FileNotFoundError, ValueError) as exc:
         print(exc, file=sys.stderr)
-        print("Detected files:", file=sys.stderr)
-        print(f"  reference={discovered['reference']}", file=sys.stderr)
-        print(f"  4G={discovered['cfg_4g']}", file=sys.stderr)
-        print(f"  5G={discovered['cfg_5g']}", file=sys.stderr)
-        if from_files:
-            print(f"  selected reference={from_files['reference']}", file=sys.stderr)
-            print(f"  selected 4G={from_files['cfg_4g']}", file=sys.stderr)
-            print(f"  selected 5G={from_files['cfg_5g']}", file=sys.stderr)
-            print(f"  unclassified={from_files['unknown']}", file=sys.stderr)
         return 2
 
-    run, summary, extras = execute_audit(
-        reference, cfg_4g, cfg_5g, args.output_dir, run_id=args.run_id
-    )
     print(f"History: {run.history_csv}")
-    print("NR Performance", dict(summary["NR Performance"]))
-    print("NR Anchor", dict(summary["NR Anchor"]))
+    for key, counter in summary.items():
+        if key != "ALL":
+            print(key, dict(counter))
     if extras["not_found"]:
         print("Not found:")
         for p in extras["not_found"]:
-            print(" ", p["ref_sheet"], p["mml"], p["pid"], p["result"]["remark"])
+            print(" ", p.get("ref_file"), p["ref_sheet"], p["mml"], p["pid"], p["result"]["remark"])
     if args.fail_on_inconsistent and summary["ALL"]["inconsistent"]:
         return 1
     return 0

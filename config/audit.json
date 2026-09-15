@@ -1,11 +1,9 @@
 {
-  "description": "Defaults for the recurring 4G/5G parameter inconsistency audit",
-  "reference_sheet_network": {
-    "NR Performance": "5G",
-    "NR Anchor": "4G"
-  },
+  "description": "Defaults for the recurring parameter inconsistency audit",
   "input_dir": "input",
+  "reference_dir": "reference",
   "output_dir": "reports",
+  "excel_limits_note": "Microsoft Excel: 1048576 rows x 16384 columns per sheet. This tool does not add a lower cap.",
   "file_patterns": {
     "reference": [
       "Reference Parameter*.xlsx",

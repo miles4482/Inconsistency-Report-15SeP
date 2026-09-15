@@ -1,20 +1,22 @@
 # Parameter Inconsistency Audit
 
-One tool: **select files or a folder on your PC → save the report to a folder on your PC**.
-Input and output stay local. There is no upload and no file-size limit.
+One tool, three local folders on your PC:
+
+| Folder | What goes in it |
+|---|---|
+| **Input Folder** | Configuration dumps used for comparing. Any names (4G dump, 5G dump, 2G dump, …). More than one file. No file-count limit. Any number of sheets and columns. Every file is checked. |
+| **Reference Folder** | Recommended / plan values. Any names. Several files (2, 3, 4…). Every file is analyzed against the Input Folder. |
+| **Output Folder** | All inconsistency reports. |
+
+Files stay on this PC. There is no upload and no file-size limit from the app.
 
 ## Windows app
 
 Download `packages/ParameterAudit_Windows.rar`, extract the folder, then run `ParameterAudit.exe`.
 
-In the app:
+The extracted folder already contains `Input`, `Reference`, and `Output`. Drop files in, then Generate Report — or Browse this PC to other folders.
 
-1. **Select files from this PC** or **Select input folder from this PC**
-   (Reference + 4G dump + 5G dump, any size, any drive).
-2. **Browse this PC** for the output folder (default: `Documents\ParameterAudit_Reports`).
-3. **Generate Report**.
-
-Windows Defender may still warn because the app is unsigned. Choose **More info → Run anyway**, or add the extracted folder as an exclusion. Use the extracted **folder** (not a single packed exe) — that is less often blocked.
+Windows Defender may still warn because the app is unsigned. Choose **More info → Run anyway**, or add the extracted folder as an exclusion. Use the extracted **folder** (not a single packed exe).
 
 To rebuild locally:
 
@@ -24,31 +26,33 @@ build_exe.bat
 
 Then run `dist\ParameterAudit\ParameterAudit.exe`.
 
-Command line (local files, local output):
+Command line (local folders):
 
 ```bash
-python3 scripts/parameter_audit_app.py file1.xlsx file2.xlsb file3.xlsb -o "C:\Users\You\Documents\ParameterAudit_Reports"
+python3 scripts/compare_reference_parameters.py --input-folder "./input" --reference-folder "./reference" --output-folder "./reports"
 ```
 
 ## Folder drop (no GUI)
 
-1. Copy new dumps into `input/`.
-2. Run `./run_audit.sh` or `run_audit.bat`.
+1. Copy dumps into `input/`.
+2. Copy reference workbooks into `reference/`.
+3. Run `./run_audit.sh` or `run_audit.bat`.
 
 Latest copies:
 
 - `reports/latest/Parameter_Inconsistency_Report.xlsx`
 - `reports/run_history.csv`
 
-## What the tool expects
+## Matching rules
 
-| Role | Typical file | Compared with |
-|---|---|---|
-| Baseline | `Reference Parameter*.xlsx` (`NR Performance`, `NR Anchor`) | recommend values |
-| 4G dump | `4G_ConfigurationData*.xlsb` / `.xlsx` | NR Anchor |
-| 5G dump | `5G_ConfigurationData*.xlsb` / `.xlsx` | NR Performance |
+- Input sheet names that match an MO / MML Object name are treated as that object.
+- Huawei dumps with a `MAPPING DEF` sheet are mapped by MOC and attribute.
+- Other workbooks are matched by sheet name and column name.
+- Every reference parameter is searched in **every** input file.
 
-Files can be named differently; the tool also looks inside the workbook if needed.
+## Limits (note)
+
+Microsoft Excel allows **1,048,576 rows** and **16,384 columns** per sheet. This tool does not add a lower cap on files, sheets, or columns. Very large dumps use more RAM and take longer. Excel 97-2003 `.xls` is not read; save as `.xlsx`.
 
 ## Report contents
 

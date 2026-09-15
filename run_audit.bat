@@ -8,5 +8,5 @@ if errorlevel 1 (
   python -m pip install -r "%~dp0requirements.txt"
 )
 
-python "%~dp0scripts\compare_reference_parameters.py" %*
+python "%~dp0scripts/compare_reference_parameters.py" --input-folder "%~dp0input" --reference-folder "%~dp0reference" --output-folder "%~dp0reports" %*
 exit /b %ERRORLEVEL%

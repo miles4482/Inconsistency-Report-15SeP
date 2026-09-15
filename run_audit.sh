@@ -8,4 +8,8 @@ if ! python3 -c "import openpyxl, pyxlsb" >/dev/null 2>&1; then
   python3 -m pip install -r "$ROOT/requirements.txt"
 fi
 
-python3 "$ROOT/scripts/compare_reference_parameters.py" "$@"
+python3 "$ROOT/scripts/compare_reference_parameters.py" \
+  --input-folder "$ROOT/input" \
+  --reference-folder "$ROOT/reference" \
+  --output-folder "$ROOT/reports" \
+  "$@"
