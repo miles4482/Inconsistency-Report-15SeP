@@ -1,0 +1,26 @@
+{
+  "description": "Defaults for the recurring parameter inconsistency audit",
+  "input_dir": "input",
+  "reference_dir": "reference",
+  "output_dir": "reports",
+  "excel_limits_note": "Microsoft Excel: 1048576 rows x 16384 columns per sheet. This tool does not add a lower cap.",
+  "file_patterns": {
+    "reference": [
+      "Reference Parameter*.xlsx",
+      "Reference Parameter*.xlsb",
+      "*Reference*Parameter*.xlsx"
+    ],
+    "4G": [
+      "4G_ConfigurationData*.xlsb",
+      "4G_ConfigurationData*.xlsx",
+      "*4G*Config*.xlsb",
+      "*4G*Config*.xlsx"
+    ],
+    "5G": [
+      "5G_ConfigurationData*.xlsb",
+      "5G_ConfigurationData*.xlsx",
+      "*5G*Config*.xlsb",
+      "*5G*Config*.xlsx"
+    ]
+  }
+}

@@ -1,0 +1,15 @@
+.venv/
+__pycache__/
+*.pyc
+reports/runs/
+reports/latest/
+input/*.xlsb
+input/*.xlsx
+input/*.xlsm
+!input/README.md
+reference/*.xlsb
+reference/*.xlsx
+reference/*.xlsm
+!reference/README.md
+build/
+dist/

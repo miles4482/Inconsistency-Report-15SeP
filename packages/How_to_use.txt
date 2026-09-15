@@ -1,0 +1,48 @@
+Parameter Inconsistency Audit — Windows folder app
+==================================================
+
+This package is a FOLDER (not a single packed exe). Extract it, then run
+ParameterAudit.exe inside the extracted folder.
+
+Three folders (created next to the .exe)
+----------------------------------------
+  Input\       configuration dumps used for comparing
+  Reference\   recommended / plan values
+  Output\      all inconsistency reports
+
+How to run
+----------
+1. Extract ParameterAudit_Windows.rar to any drive (for example D:\ParameterAudit).
+2. Put every dump you want to compare into Input\
+     - Any file names (4G dump, 5G dump, 2G dump, or any other name)
+     - More than one file; no file-count limit
+     - Any number of sheets; any number of columns
+     - Sheet names that match an MO / MML Object are treated as that object
+     - Every file is checked against the reference files
+3. Put every recommended / plan-value workbook into Reference\
+     - Any file names; 2, 3, 4, 5… files are all treated as reference
+     - Different sheet names and many columns are OK
+     - Every file is analyzed
+4. Double-click ParameterAudit.exe
+5. Confirm the three folders (or Browse this PC to other folders)
+6. Click Generate Report
+7. Reports are written to the Output folder (and opened if you choose)
+
+You can also Browse this PC and point the app at folders that already exist
+somewhere else. Files stay on this PC. Nothing is uploaded. There is no
+file-size limit from the app.
+
+Supported files: .xlsx  .xlsb  .xlsm
+Excel 97-2003 .xls is not read; save as .xlsx first.
+
+Limits (note)
+-------------
+Microsoft Excel itself allows 1,048,576 rows and 16,384 columns per sheet.
+This tool does not add a lower cap on files, sheets, or columns.
+Very large dumps need more RAM and take longer.
+
+Windows Defender
+----------------
+The app is unsigned. If Windows blocks it: More info → Run anyway,
+or add the extracted folder as an exclusion. Use the extracted FOLDER,
+not a single packed exe.
