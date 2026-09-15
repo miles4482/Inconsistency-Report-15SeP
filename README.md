@@ -1,12 +1,22 @@
-Please do find inconsistency  for "Reference Parameter_v1.0" comparing with my 4G & 5G configuration data.
+# Parameter Inconsistency Report (15 Sep 2026)
 
-Please make summary of incon in below way:
+Compare **Reference Parameter_v1.0** against live 4G and 5G configuration dumps.
 
-1. Overal Report
-   - How many parameter incon from both sheet. Overall summary
-   - Function wise Summary for individual sheet
-  
-2. All parameter wise report: here function wise all parameter report
-   
-3. Sheet wise report
-4. Final Summary 
+## Input files
+
+- `Reference Parameter_v1.0.xlsx` — baseline recommend values (`NR Performance` = 5G, `NR Anchor` = 4G)
+- `4G_ConfigurationData_15Sep26.xlsb`
+- `5G_ConfigurationData_15Sep26.xlsb`
+
+## Output
+
+- `reports/Parameter_Inconsistency_Report_15Sep26.xlsx` — workbook with Overall, All-parameter, Sheet-wise, and Final Summary sheets
+- `reports/Parameter_Inconsistency_Report_15Sep26.md` — same content in Markdown
+
+## How to regenerate
+
+```bash
+python3 scripts/compare_reference_parameters.py
+```
+
+Requires `openpyxl` and `pyxlsb`.
