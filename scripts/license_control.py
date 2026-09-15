@@ -28,9 +28,19 @@ PRODUCT = "ParameterAudit"
 LICENSE_VERSION = 1
 DEFAULT_LICENSE_DAYS = 7
 PUBLIC_KEY_HEX = "6548084c272904e8302919e2d65820864237cee65d509f4589b3f8b0f9f19fc9"
-LICENSE_FILENAMES = ("ParameterAudit.lic", "license.lic", "license.json")
+LICENSE_FILENAMES = (
+    "ParameterAudit.lic",
+    "ParameterAudit.json",
+    "ParameterAudit.txt",
+    "ParameterAudit.lic.txt",
+    "license.lic",
+    "license.json",
+    "license.txt",
+)
+LICENSE_SUFFIXES = {".lic", ".json", ".txt"}
+SKIP_LICENSE_NAMES = {"readme.txt", "how_to_use.txt", "readme.md"}
 PRIVATE_KEY_FILENAMES = ("parameter_audit_private.key", "ParameterAudit.key")
-CLOCK_SKEW = timedelta(minutes=10)
+CLOCK_SKEW = timedelta(hours=24)
 
 
 class LicenseError(Exception):
@@ -110,7 +120,7 @@ def find_private_key_path() -> Path | None:
         candidates.append(Path(env).expanduser())
     root = runtime_root()
     home = Path.home() / ".parameter_audit"
-    for folder in (root, root / "secrets", Path.cwd(), Path.cwd() / "secrets", home):
+    for folder in (root, root / "secrets", root / "LicenseGenerator", Path.cwd(), Path.cwd() / "secrets", home):
         for name in PRIVATE_KEY_FILENAMES:
             candidates.append(folder / name)
     seen = set()
@@ -124,22 +134,112 @@ def find_private_key_path() -> Path | None:
     return None
 
 
-def find_license_path(explicit: Path | None = None) -> Path | None:
-    if explicit:
-        path = Path(explicit).expanduser()
-        return path if path.is_file() else None
-    env = os.environ.get("PARAMETER_AUDIT_LICENSE", "").strip()
-    candidates = []
-    if env:
-        candidates.append(Path(env).expanduser())
+def _license_search_folders() -> list[Path]:
     root = runtime_root()
-    for folder in (root, Path.cwd(), Path.home() / ".parameter_audit"):
+    folders = [
+        root,
+        root / "License",
+        Path.cwd(),
+        Path.cwd() / "License",
+        Path.home() / ".parameter_audit",
+    ]
+    # Generator and audit apps may sit in sibling folders after extract.
+    parent = root.parent
+    folders.extend([parent, parent / "ParameterAudit", parent / "LicenseGenerator"])
+    unique = []
+    seen = set()
+    for folder in folders:
+        try:
+            key = folder.resolve()
+        except OSError:
+            key = folder
+        if key in seen:
+            continue
+        seen.add(key)
+        unique.append(folder)
+    return unique
+
+
+def _looks_like_license_name(path: Path) -> bool:
+    name = path.name.lower()
+    if name in SKIP_LICENSE_NAMES:
+        return False
+    if path.suffix.lower() not in LICENSE_SUFFIXES:
+        return False
+    if name in {n.lower() for n in LICENSE_FILENAMES}:
+        return True
+    return "license" in name or "parameteraudit" in name or name.startswith("owner_")
+
+
+def iter_license_candidates(explicit: Path | None = None) -> list[Path]:
+    ordered = []
+    seen = set()
+
+    def add(path: Path | None):
+        if path is None:
+            return
+        path = Path(path).expanduser()
+        if not path.is_file():
+            return
+        key = str(path.resolve()) if path.exists() else str(path)
+        if key in seen:
+            return
+        seen.add(key)
+        ordered.append(path)
+
+    if explicit:
+        add(Path(explicit))
+        return ordered
+    env = os.environ.get("PARAMETER_AUDIT_LICENSE", "").strip()
+    if env:
+        add(Path(env))
+    for folder in _license_search_folders():
+        if not folder.exists() or not folder.is_dir():
+            continue
         for name in LICENSE_FILENAMES:
-            candidates.append(folder / name)
-    for path in candidates:
-        if path.is_file():
+            add(folder / name)
+        try:
+            extra = sorted(folder.iterdir(), key=lambda p: p.name.lower())
+        except OSError:
+            extra = []
+        for path in extra:
+            if path.is_file() and _looks_like_license_name(path):
+                add(path)
+    return ordered
+
+
+def find_license_path(explicit: Path | None = None) -> Path | None:
+    last_existing = None
+    for path in iter_license_candidates(explicit):
+        last_existing = path
+        try:
+            verify_license_file(path, update_clock=False)
             return path
-    return None
+        except LicenseError:
+            continue
+    return last_existing
+
+
+def read_license_text(path: Path) -> str:
+    raw = Path(path).read_bytes()
+    if raw.startswith(b"\xff\xfe") or raw.startswith(b"\xfe\xff"):
+        return raw.decode("utf-16")
+    encodings = ("utf-8-sig", "utf-8", "utf-16", "utf-16-le", "cp1252")
+    for enc in encodings:
+        try:
+            return raw.decode(enc)
+        except UnicodeDecodeError:
+            continue
+    return raw.decode("utf-8", errors="replace")
+
+
+def parse_license_json(text: str) -> dict:
+    cleaned = text.strip().lstrip("\ufeff")
+    start = cleaned.find("{")
+    end = cleaned.rfind("}")
+    if start >= 0 and end > start:
+        cleaned = cleaned[start : end + 1]
+    return json.loads(cleaned)
 
 
 def _canonical_payload(data: dict) -> bytes:
@@ -158,6 +258,7 @@ def _state_path() -> Path:
 
 
 def _check_clock(now: datetime) -> None:
+    """Record last seen time. Do not reject the license if the PC clock shifted."""
     path = _state_path()
     last = None
     if path.exists():
@@ -166,20 +267,19 @@ def _check_clock(now: datetime) -> None:
             last = _parse_dt(payload.get("last_seen"))
         except Exception:
             last = None
-    if last is not None and now + CLOCK_SKEW < last:
-        raise LicenseError(
-            "System clock appears to have been moved backward. "
-            "Correct the date/time and try again."
-        )
-    stamp = last if last and last > now else now
+    stamp = now
+    if last is not None and last > now + CLOCK_SKEW:
+        stamp = last
+    elif last is not None and last > now:
+        stamp = last
     path.write_text(json.dumps({"last_seen": _fmt_dt(stamp)}, indent=2) + "\n", encoding="utf-8")
 
 
-def verify_license_file(path: Path) -> LicenseInfo:
+def verify_license_file(path: Path, update_clock: bool = True) -> LicenseInfo:
     try:
-        data = json.loads(Path(path).read_text(encoding="utf-8"))
+        data = parse_license_json(read_license_text(path))
     except Exception as exc:
-        raise LicenseError(f"License file is not valid JSON: {path}") from exc
+        raise LicenseError(f"License file is not valid JSON: {path.name}") from exc
     signature = data.get("signature")
     if not signature:
         raise LicenseError("License file has no signature.")
@@ -193,7 +293,8 @@ def verify_license_file(path: Path) -> LicenseInfo:
     issued_at = _parse_dt(data.get("issued_at"))
     expires_at = _parse_dt(data.get("expires_at"))
     now = _utcnow()
-    _check_clock(now)
+    if update_clock:
+        _check_clock(now)
     if now + CLOCK_SKEW < issued_at:
         raise LicenseError(f"License is not valid until {issued_at.date().isoformat()}.")
     if now > expires_at:
@@ -217,31 +318,43 @@ def verify_license_file(path: Path) -> LicenseInfo:
 
 
 def license_status(explicit: Path | None = None) -> LicenseInfo:
-    path = find_license_path(explicit)
-    if path is None:
-        return LicenseInfo(
-            path=None,
-            license_id="",
-            issued_to="",
-            issued_at=_utcnow(),
-            expires_at=_utcnow(),
-            active=False,
-            message="No license file found. Place ParameterAudit.lic next to the app, or load a license.",
-            payload={},
-        )
-    try:
-        return verify_license_file(path)
-    except LicenseError as exc:
-        return LicenseInfo(
-            path=path,
-            license_id="",
-            issued_to="",
-            issued_at=_utcnow(),
-            expires_at=_utcnow(),
-            active=False,
-            message=str(exc),
-            payload={},
-        )
+    last_error = "No license file found. Put a .lic / .json / .txt license next to ParameterAudit.exe, or click Load license."
+    last_path = None
+    for path in iter_license_candidates(explicit):
+        last_path = path
+        try:
+            return verify_license_file(path)
+        except LicenseError as exc:
+            last_error = str(exc)
+            continue
+    return LicenseInfo(
+        path=last_path,
+        license_id="",
+        issued_to="",
+        issued_at=_utcnow(),
+        expires_at=_utcnow(),
+        active=False,
+        message=last_error,
+        payload={},
+    )
+
+
+def install_license(source: Path, dest_dir: Path | None = None) -> LicenseInfo:
+    """Verify any license file and save a clean ParameterAudit.lic/.json/.txt next to the app."""
+    info = verify_license_file(source)
+    dest_dir = Path(dest_dir) if dest_dir else runtime_root()
+    write_license_bundle(info.payload, dest_dir)
+    info.path = (dest_dir / "ParameterAudit.lic").resolve()
+    return info
+
+
+def write_license_bundle(payload: dict, dest_dir: Path, stem: str = "ParameterAudit") -> Path:
+    dest_dir = Path(dest_dir)
+    dest_dir.mkdir(parents=True, exist_ok=True)
+    text = json.dumps(payload, indent=2) + "\n"
+    for suffix in (".lic", ".json", ".txt"):
+        (dest_dir / f"{stem}{suffix}").write_text(text, encoding="utf-8", newline="\n")
+    return dest_dir / f"{stem}.lic"
 
 
 def require_active_license(explicit: Path | None = None) -> LicenseInfo:
@@ -285,7 +398,7 @@ def extend_license(
     until: datetime | None = None,
     private_key_path: Path | None = None,
 ) -> dict:
-    data = json.loads(Path(path).read_text(encoding="utf-8"))
+    data = parse_license_json(read_license_text(path))
     current_expiry = _parse_dt(data.get("expires_at"))
     now = _utcnow().replace(microsecond=0)
     if until is not None:

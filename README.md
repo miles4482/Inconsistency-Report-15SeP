@@ -12,18 +12,21 @@ Files stay on this PC. There is no upload and no file-size limit from the app.
 
 ## License (required)
 
-The app will not run without an active signed license. Default validity is **7 days**. Place `ParameterAudit.lic` next to the exe (or load it in the GUI).
+The app will not run without an active signed license. Default validity is **7 days**.
 
-Owner (you) — keep `parameter_audit_private.key` private (not in git). Issue or extend at any time:
+You can drop **`.lic`, `.json`, or `.txt`** next to `ParameterAudit.exe` — no rename needed — or click **Load license file…**.
+
+### Owner: generate a license on Windows
+
+1. Open `LicenseGenerator.exe`.
+2. Type **Days of license** (example: `7`).
+3. Click **Generate license**.
+4. Copy the generated `ParameterAudit.lic` (also saved as `.json` and `.txt`) next to `ParameterAudit.exe`.
 
 ```bash
 python3 scripts/issue_license.py --to "Site A" --days 7 -o SiteA.lic
-python3 scripts/issue_license.py --extend SiteA.lic --days 7
-python3 scripts/issue_license.py --extend SiteA.lic --until 2026-12-31
-python3 scripts/issue_license.py --status
+python3 scripts/license_generator_app.py
 ```
-
-If the private key is next to `ParameterAudit.exe`, the app shows **License Admin** so you can issue and extend from the GUI.
 
 ## Windows app
 

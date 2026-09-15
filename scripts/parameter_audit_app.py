@@ -124,28 +124,28 @@ def launch_gui():
     def load_license_file(path: Path | None = None):
         if path is None:
             chosen = filedialog.askopenfilename(
-                title="Select ParameterAudit.lic",
-                filetypes=[("License files", "*.lic *.json"), ("All files", "*.*")],
+                title="Select license file (.lic / .json / .txt)",
+                filetypes=[
+                    ("License files", "*.lic *.json *.txt"),
+                    ("All files", "*.*"),
+                ],
             )
             if not chosen:
                 return
             path = Path(chosen)
-        dest = app_root() / "ParameterAudit.lic"
         try:
-            info = license_mod.verify_license_file(path)
-            if path.resolve() != dest.resolve():
-                dest.write_text(path.read_text(encoding="utf-8"), encoding="utf-8")
+            info = license_mod.install_license(path, app_root())
             license_state["info"] = info
-            license_state["path"] = dest if dest.is_file() else path
+            license_state["path"] = info.path
             apply_license_ui()
-            messagebox.showinfo("License loaded", license_state["info"].message)
+            messagebox.showinfo("License loaded", info.message)
         except Exception as exc:
             license_state["info"] = license_mod.license_status(path)
             apply_license_ui()
             messagebox.showerror("License not valid", str(exc)[:1500])
 
     def refresh_license():
-        license_state["info"] = license_mod.license_status(current_license_path())
+        license_state["info"] = license_mod.license_status()
         apply_license_ui()
 
     def issue_new_license():
@@ -378,7 +378,7 @@ def launch_gui():
         font=("Segoe UI", 10, "bold"),
     )
     license_label.pack(side=tk.LEFT, fill=tk.X, expand=True)
-    tk.Button(lic_frame, text="Load license…", command=lambda: load_license_file(), width=14).pack(
+    tk.Button(lic_frame, text="Load license file…", command=lambda: load_license_file(), width=18).pack(
         side=tk.RIGHT, padx=(8, 0)
     )
     tk.Button(lic_frame, text="Refresh", command=refresh_license, width=10).pack(side=tk.RIGHT)

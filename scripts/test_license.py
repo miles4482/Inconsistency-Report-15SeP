@@ -64,6 +64,18 @@ def main() -> int:
         dated_info = lic.verify_license_file(good)
         assert dated_info.days_remaining >= 29
 
+        txt = folder / "Owner_ParameterAudit_7day.txt"
+        txt.write_text(good.read_text(encoding="utf-8"), encoding="utf-8")
+        assert lic.verify_license_file(txt).active
+        utf16 = folder / "utf16.txt"
+        utf16.write_bytes(good.read_text(encoding="utf-8").encode("utf-16"))
+        assert lic.verify_license_file(utf16).active
+        installed = lic.install_license(txt, folder)
+        assert (folder / "ParameterAudit.lic").is_file()
+        assert (folder / "ParameterAudit.json").is_file()
+        assert (folder / "ParameterAudit.txt").is_file()
+        assert installed.active
+
         missing = folder / "missing.lic"
         info_missing = lic.license_status(missing)
         assert not info_missing.active
