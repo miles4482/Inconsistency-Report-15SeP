@@ -73,6 +73,10 @@ CFG_5G_PATTERNS = (
 TRUE_SET = {"1", "1.0", "ON", "TRUE", "YES", "ENABLE", "ENABLED"}
 FALSE_SET = {"0", "0.0", "OFF", "FALSE", "NO", "DISABLE", "DISABLED"}
 UNIT_RE = re.compile(r"^(-?\d+(?:\.\d+)?)(MS|S|DBM|DB|MHZ|KHZ|MIN|DAY)?$", re.I)
+SWITCH_ASSIGN_RE = re.compile(
+    r"^([A-Za-z][A-Za-z0-9_]*)\s*-\s*(0|1|ON|OFF|TRUE|FALSE|YES|NO)$",
+    re.I,
+)
 META_SHEETS = {
     "SUMMARYRES",
     "FILEIDENTIFICATION",
@@ -514,6 +518,59 @@ def extract_bit(value, bit_name):
     return None, "bit_missing"
 
 
+def parse_switch_recommend(value):
+    """Recommend that names switch/bit options inside a packed parameter.
+
+    Direct values (1, ON, -108, L9:1) return None.
+    Switch recommends (GeranCsftbSwitch-1 or A-0&B-1) return
+    a list of (bit_name, expected_value).
+    """
+    text = clean_text(value)
+    if not text:
+        return None
+    if smart.BAND_VALUE_RE.search(text) or (text.startswith("(") and "=" in text):
+        return None
+    parts = [p.strip() for p in text.split("&") if p.strip()]
+    if not parts:
+        return None
+    parsed = []
+    for part in parts:
+        match = SWITCH_ASSIGN_RE.fullmatch(part)
+        if not match:
+            return None
+        parsed.append((match.group(1), match.group(2)))
+    if len(parsed) == 1 and len(parsed[0][0]) < 3:
+        return None
+    return parsed
+
+
+def audit_switch_bits(raw, expected_pairs):
+    """Look up each recommended switch/bit inside the dump parameter column.
+
+    Extra switches present in the dump are ignored. Returns
+    (display, state, all_match, missing_names).
+    """
+    dump_bits = parse_bitfield(raw)
+    if not dump_bits:
+        display = clean_text(raw) or "<EMPTY>"
+        return display, "not_bitfield", False, [name for name, _exp in expected_pairs]
+    parts = []
+    missing = []
+    all_match = True
+    for name, expected in expected_pairs:
+        actual = dump_bits.get(norm_key(name))
+        if actual is None:
+            missing.append(name)
+            all_match = False
+            parts.append(f"{name}=<MISSING>")
+            continue
+        parts.append(f"{name}-{actual}")
+        if not values_match(actual, expected):
+            all_match = False
+    state = "bit_missing" if missing else "found"
+    return "&".join(parts), state, all_match, missing
+
+
 def load_mapping(path: Path):
     moc_to_sheet = {}
     attrs_by_moc = defaultdict(dict)
@@ -905,11 +962,41 @@ def compare_param(param, resolved, cache, cell_index=None):
     need_ctx = spec.has_conditional
     indexes = sheet.get("identity_idx") if need_ctx else None
     bit_name = resolved.get("bit")
+    rec_switch_bits = None if need_ctx else parse_switch_recommend(recommend)
+    if rec_switch_bits and not bit_name:
+        resolved["bit"] = "&".join(name for name, _exp in rec_switch_bits)
+        bit_name = resolved["bit"]
     for row in sheet["rows"]:
         raw = row[col_idx] if col_idx < len(row) else None
+        ctx = None
+        if need_ctx:
+            ctx = smart.cell_from_row(sheet["headers"], sheet["header_norm"], row, indexes=indexes)
+            if cell_index is not None:
+                ctx = cell_index.enrich(ctx)
+            expected, applied_note = smart.select_recommend(spec, ctx)
+            if expected is None:
+                out["skipped_not_applicable"] += 1
+                continue
+            row_recommend = expected
+            if applied_note:
+                applied_notes[f"{applied_note}=>{row_recommend}"] += 1
+        else:
+            row_recommend = recommend
+
+        switch_bits = parse_switch_recommend(row_recommend) if need_ctx else rec_switch_bits
         used = raw
         bit_state = ""
-        if bit_name:
+        switch_all_match = None
+        if switch_bits:
+            used, bit_state, switch_all_match, missing_bits = audit_switch_bits(raw, switch_bits)
+            if missing_bits and "closest_bit" not in out:
+                dump_bits = parse_bitfield(raw) or {}
+                hit, _score, _why = smart.closest_name(missing_bits[0], dump_bits.keys(), cutoff=0.8)
+                if hit:
+                    out["closest_bit"] = hit
+            if not resolved.get("bit"):
+                resolved["bit"] = "&".join(name for name, _exp in switch_bits)
+        elif bit_name:
             bit_val, bit_state = extract_bit(raw, bit_name)
             if bit_state == "found":
                 used = bit_val
@@ -934,23 +1021,22 @@ def compare_param(param, resolved, cache, cell_index=None):
         display = clean_text(used)
         if display == "":
             display = "<EMPTY>"
-        ctx = None
-        if need_ctx:
-            ctx = smart.cell_from_row(sheet["headers"], sheet["header_norm"], row, indexes=indexes)
-            if cell_index is not None:
-                ctx = cell_index.enrich(ctx)
-            expected, applied_note = smart.select_recommend(spec, ctx)
-            if expected is None:
-                out["skipped_not_applicable"] += 1
-                continue
-            row_recommend = expected
-            if applied_note:
-                applied_notes[f"{applied_note}=>{row_recommend}"] += 1
-        else:
-            row_recommend = recommend
         counts[display] += 1
         out["objects_checked"] += 1
         if is_empty(row_recommend):
+            continue
+        if switch_all_match is True:
+            out["match_count"] += 1
+            continue
+        if switch_all_match is False:
+            if bit_state == "bit_missing":
+                out["missing_count"] += 1
+            out["mismatch_count"] += 1
+            if len(mismatches) < 8:
+                mismatches.append(
+                    object_label(row, sheet["headers"], ctx)
+                    + f" expected {clean_text(row_recommend)} -> {display}"
+                )
             continue
         if bit_state == "bit_missing":
             out["missing_count"] += 1
@@ -1011,7 +1097,10 @@ def compare_param(param, resolved, cache, cell_index=None):
             f"Actual: {unique_actual_text(out['unique_actuals'])}. "
             "Additional Frequency Band may be the intended NULL field."
         )
-    elif out["unique_actuals"] and str(out["unique_actuals"][0][0]).startswith("<BIT_MISSING"):
+    elif out["unique_actuals"] and (
+        str(out["unique_actuals"][0][0]).startswith("<BIT_MISSING")
+        or "=<MISSING>" in str(out["unique_actuals"][0][0])
+    ):
         extra = ""
         if "closest_bit" in out:
             extra = f" Closest live bit key seen: {out['closest_bit']}."
@@ -2082,7 +2171,7 @@ def write_excel(params, summary, func_summary, run: RunContext):
         "- Every reference workbook is fully analyzed. Every input workbook is searched for each parameter.",
         "- Sheet names in input dumps that match an MO / MML Object name are treated as that object.",
         "- Huawei dumps with a MAPPING DEF sheet are mapped by MOC/attribute; other workbooks use sheet and column names.",
-        "- Switch bits (ParameterID format BIT@Attribute or Attribute@BIT) are extracted from Huawei bit-pack strings (NAME-1&NAME-0).",
+        "- Switch bits are extracted from Huawei bit-pack strings (NAME-1&NAME-0). Recommend may name the bit as SwitchName-0 / SwitchName-1 (or several joined by &) against Parameter Name; Parameter ID BIT@Attribute still works.",
         "- Mixed / Partial means some cells or sites match the recommend value and others do not; these are counted as inconsistency.",
         "- Empty Recommend Value in the reference file cannot be judged; they are excluded from the inconsistency rate.",
         f"- Microsoft Excel limit: {EXCEL_MAX_ROWS:,} rows and {EXCEL_MAX_COLS:,} columns per sheet. This tool does not add a lower cap.",

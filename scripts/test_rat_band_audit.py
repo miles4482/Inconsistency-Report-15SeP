@@ -166,6 +166,119 @@ def test_simple_compare_is_fast():
     assert elapsed < 1.5, f"simple compare too slow: {elapsed:.2f}s"
 
 
+HO_ALLOWED_PACK = (
+    "SnBasedInterFreqHoSw-0&GeranSepOpMobilitySwitch-0&UtranCsftbSwitch-0"
+    "&GeranCsftbSwitch-1&UtranFlashCsftbSwitch-0&GeranFlashCsftbSwitch-0"
+    "&CsftbAdaptiveBlindHoSwitch-1"
+)
+
+
+def _switch_sheet(rows):
+    headers = ["*eNodeB Name", "*Local cell ID", "Handover Allowed Switch"]
+    header_norm = {smart.norm_key(h): i for i, h in enumerate(headers)}
+    return {
+        "headers": headers,
+        "header_index": {h: i for i, h in enumerate(headers)},
+        "header_norm": header_norm,
+        "rows": rows,
+        "identity_idx": smart.identity_indexes(header_norm, fuzzy=False),
+    }
+
+
+def test_switch_bits_inside_parameter_column():
+    """Recommend GeranCsftbSwitch-1 must be looked up inside the packed dump column."""
+    assert audit.parse_switch_recommend("1") is None
+    assert audit.parse_switch_recommend("ON") is None
+    assert audit.parse_switch_recommend("-108") is None
+    assert audit.parse_switch_recommend("L9:1") is None
+    geran = audit.parse_switch_recommend("GeranCsftbSwitch-1")
+    assert geran == [("GeranCsftbSwitch", "1")]
+    multi = audit.parse_switch_recommend("GeranCsftbSwitch-1&UtranCsftbSwitch-0")
+    assert multi == [("GeranCsftbSwitch", "1"), ("UtranCsftbSwitch", "0")]
+
+    packed_ok = HO_ALLOWED_PACK
+    packed_off = packed_ok.replace("GeranCsftbSwitch-1", "GeranCsftbSwitch-0")
+    sheet = _switch_sheet(
+        [
+            [None, 11, packed_ok],
+            [None, 14, packed_ok],
+            [None, 20, packed_ok],
+            [None, 74, packed_off],
+        ]
+    )
+
+    class FakeCache:
+        def get(self, _name):
+            return sheet
+
+    resolved = {
+        "reason": "OK",
+        "sheet": "CellAlgoSwitch",
+        "column": "Handover Allowed Switch",
+        "bit": None,
+        "smart_note": "",
+    }
+
+    geran_param = {
+        "pid": "HoAllowedSwitch",
+        "param_name": "Handover Allowed Switch",
+        "recommend": "GeranCsftbSwitch-1",
+        "mml": "CELLALGOSWITCH",
+    }
+    out = audit.compare_param(geran_param, dict(resolved), FakeCache(), cell_index=None)
+    assert out["status"] == "Mixed / Partial"
+    assert out["match_count"] == 3
+    assert out["mismatch_count"] == 1
+    assert out["objects_checked"] == 4
+    actuals = [name for name, _n in out["unique_actuals"]]
+    assert "GeranCsftbSwitch-1" in actuals
+    assert "GeranCsftbSwitch-0" in actuals
+    assert not any("&SnBased" in a or "SnBasedInterFreqHoSw" in a for a in actuals)
+
+    utran0 = dict(geran_param, recommend="UtranCsftbSwitch-0")
+    out0 = audit.compare_param(utran0, dict(resolved), FakeCache(), cell_index=None)
+    assert out0["status"] == "Consistent"
+    assert out0["match_count"] == 4
+
+    utran1 = dict(geran_param, recommend="UtranCsftbSwitch-1")
+    out1 = audit.compare_param(utran1, dict(resolved), FakeCache(), cell_index=None)
+    assert out1["status"] == "Inconsistent"
+    assert out1["match_count"] == 0
+    assert out1["mismatch_count"] == 4
+
+    both = dict(geran_param, recommend="GeranCsftbSwitch-1&UtranCsftbSwitch-0")
+    out_both = audit.compare_param(both, dict(resolved), FakeCache(), cell_index=None)
+    assert out_both["match_count"] == 3
+    assert out_both["mismatch_count"] == 1
+
+    # Direct numeric values still compare the whole cell, not bits
+    num_sheet = _switch_sheet([[None, 11, 20], [None, 14, 20]])
+    num_sheet["headers"] = ["*eNodeB Name", "*Local cell ID", "Some Param"]
+    num_sheet["header_index"] = {h: i for i, h in enumerate(num_sheet["headers"])}
+    num_sheet["header_norm"] = {smart.norm_key(h): i for i, h in enumerate(num_sheet["headers"])}
+
+    class NumCache:
+        def get(self, _name):
+            return num_sheet
+
+    num_param = {
+        "pid": "SomeParam",
+        "param_name": "Some Param",
+        "recommend": "20",
+        "mml": "CellMLB",
+    }
+    num_resolved = {
+        "reason": "OK",
+        "sheet": "CellMLB",
+        "column": "Some Param",
+        "bit": None,
+        "smart_note": "",
+    }
+    num_out = audit.compare_param(num_param, num_resolved, NumCache(), cell_index=None)
+    assert num_out["status"] == "Consistent"
+    assert num_out["match_count"] == 2
+
+
 def test_list_workbooks_rats():
     with tempfile.TemporaryDirectory() as raw:
         root = Path(raw)
@@ -201,31 +314,41 @@ def _build_4g_dump(path: Path):
         wb,
         "CellAlgoSwitch",
         [
-            ["MODIND", "ENODEBNAME", "LOCALCELLID", "ENHANCEDMLBALGOSWITCH"],
-            ["*eNodeB Name", "*eNodeB Name", "*Local cell ID", "Enhanced MLB Algorithm Switch"],
+            ["MODIND", "ENODEBNAME", "LOCALCELLID", "ENHANCEDMLBALGOSWITCH", "HOALLOWEDSWITCH"],
+            [
+                "*eNodeB Name",
+                "*eNodeB Name",
+                "*Local cell ID",
+                "Enhanced MLB Algorithm Switch",
+                "Handover Allowed Switch",
+            ],
             [
                 None,
                 "DHAPT08",
                 11,
                 "SpectralETBasedLoadEvalSw-1&OtherSw-0",
+                "SnBasedInterFreqHoSw-0&GeranSepOpMobilitySwitch-0&UtranCsftbSwitch-0&GeranCsftbSwitch-1&UtranFlashCsftbSwitch-0&GeranFlashCsftbSwitch-0&CsftbAdaptiveBlindHoSwitch-1",
             ],
             [
                 None,
                 "DHAPT08",
                 14,
                 "SpectralETBasedLoadEvalSw-1&OtherSw-0",
+                "SnBasedInterFreqHoSw-0&GeranSepOpMobilitySwitch-0&UtranCsftbSwitch-0&GeranCsftbSwitch-1&UtranFlashCsftbSwitch-0&GeranFlashCsftbSwitch-0&CsftbAdaptiveBlindHoSwitch-1",
             ],
             [
                 None,
                 "DHAPT08",
                 20,
                 "SpectralETBasedLoadEvalSw-0&OtherSw-0",
+                "SnBasedInterFreqHoSw-0&GeranSepOpMobilitySwitch-0&UtranCsftbSwitch-0&GeranCsftbSwitch-1&UtranFlashCsftbSwitch-0&GeranFlashCsftbSwitch-0&CsftbAdaptiveBlindHoSwitch-1",
             ],
             [
                 None,
                 "DHAPT08",
                 74,
                 "SpectralETBasedLoadEvalSw-1&OtherSw-0",
+                "SnBasedInterFreqHoSw-0&GeranSepOpMobilitySwitch-0&UtranCsftbSwitch-0&GeranCsftbSwitch-0&UtranFlashCsftbSwitch-0&GeranFlashCsftbSwitch-0&CsftbAdaptiveBlindHoSwitch-1",
             ],
         ],
     )
@@ -338,6 +461,24 @@ def _build_reference(path: Path):
                 "Enhanced MLB Algorithm Switch",
                 "1",
             ],
+            [
+                "CELLALGOSWITCH",
+                "HoAllowedSwitch",
+                "Handover Allowed Switch",
+                "GeranCsftbSwitch-1",
+            ],
+            [
+                "CELLALGOSWITCH",
+                "HoAllowedSwitch",
+                "Handover Allowed Switch",
+                "UtranCsftbSwitch-0",
+            ],
+            [
+                "CELLALGOSWITCH",
+                "HoAllowedSwitch",
+                "Handover Allowed Switch",
+                "UtranCsftbSwitch-1",
+            ],
         ],
     )
     _save(wb, path)
@@ -394,10 +535,37 @@ def test_end_to_end_audit():
         legacy = next(p for p in params if p["reference_sheet"] == "Legacy")
         assert legacy["status"] in {"Mixed / Partial", "Inconsistent", "Consistent"}
 
-        three = next(p for p in params if p["reference_sheet"] == "Three Keys")
+        three = next(p for p in params if p["reference_sheet"] == "Three Keys" and "SpectralETBasedLoadEvalSw" in p["parameter_id"])
         assert three["parameter_name"] == "Enhanced MLB Algorithm Switch"
         assert three["status"] in {"Mixed / Partial", "Inconsistent", "Consistent"}
         assert int(three["objects_checked"]) >= 1
+
+        geran = next(
+            p
+            for p in params
+            if p["reference_sheet"] == "Three Keys" and p["recommend_value"] == "GeranCsftbSwitch-1"
+        )
+        assert geran["status"] == "Mixed / Partial"
+        assert int(geran["match_count"]) == 3
+        assert int(geran["mismatch_count"]) == 1
+        assert "GeranCsftbSwitch" in (geran.get("bit_name") or "")
+
+        utran_off = next(
+            p
+            for p in params
+            if p["reference_sheet"] == "Three Keys" and p["recommend_value"] == "UtranCsftbSwitch-0"
+        )
+        assert utran_off["status"] == "Consistent"
+        assert int(utran_off["match_count"]) == 4
+
+        utran_on = next(
+            p
+            for p in params
+            if p["reference_sheet"] == "Three Keys" and p["recommend_value"] == "UtranCsftbSwitch-1"
+        )
+        assert utran_on["status"] == "Inconsistent"
+        assert int(utran_on["match_count"]) == 0
+        assert int(utran_on["mismatch_count"]) == 4
 
         assert run.out_xlsx.exists()
         assert "4G" in ",".join(run.selected_rats)
@@ -417,6 +585,7 @@ def main() -> int:
     test_three_identity_columns()
     test_fuzzy_names()
     test_simple_compare_is_fast()
+    test_switch_bits_inside_parameter_column()
     test_list_workbooks_rats()
     test_end_to_end_audit()
     print("rat-band-smart-audit tests passed")

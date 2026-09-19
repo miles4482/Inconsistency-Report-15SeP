@@ -1,1 +1,1 @@
-ParameterAudit v1.5.0
+ParameterAudit v1.6.0
