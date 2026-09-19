@@ -23,28 +23,34 @@ To CREATE a license (owner):
 
 Three folders (created next to the .exe)
 ----------------------------------------
-  Input\       configuration dumps used for comparing
+  Input\
+    5G\    5G / NR dumps
+    4G\    4G / LTE dumps
+    3G\    3G dumps
+    2G\    2G dumps
   Reference\   recommended / plan values
   Output\      all inconsistency reports
 
 How to run
 ----------
 1. Extract ParameterAudit_Windows.rar to any drive (for example D:\ParameterAudit).
-2. Put every dump you want to compare into Input\
-     - Any file names (4G dump, 5G dump, 2G dump, or any other name)
-     - More than one file; no file-count limit
+2. Put dumps into the matching Input network folder:
+     Input\5G   Input\4G   Input\3G   Input\2G
+     - Any file names; more than one file; no file-count limit
      - Any number of sheets; any number of columns
-     - Sheet names that match an MO / MML Object are treated as that object
-     - Every file is checked against the reference files
+     - 4G Cell sheet maps eNodeB + Local Cell ID to L09/L18/L21/L26
+     - 5G NRDUCell sheet maps gNodeB + NR DU Cell ID to the NR band
 3. Put every recommended / plan-value workbook into Reference\
-     - Any file names; 2, 3, 4, 5… files are all treated as reference
-     - Different sheet names and many columns are OK
-     - Every file is analyzed
+     - Always include these three columns: MML Object, Parameter ID, Parameter Name
+     - Parameter Name = dump display name (used to find the field in Input)
+     - Parameter ID may be SwitchName@Attribute (before @ = switch, after @ = parameter)
+     - Proposed / Recommended / Plan value columns are detected automatically
+     - Band/group conditions such as L9:1 or (InterFreqHoGroupId=1)=>L09=-108 are applied per cell
 4. Put a license file next to ParameterAudit.exe (.lic or .json or .txt). No rename required.
    Or click Load license file… and pick the file.
 5. Double-click ParameterAudit.exe
-6. Confirm the three folders (or Browse this PC to other folders)
-7. Click Generate Report
+6. Tick 5G / 4G / 3G / 2G — only those Input folders are searched
+7. Click **Generate Report** (always shown at the bottom of the window)
 8. Reports are written to the Output folder (and opened if you choose)
 
 You can also Browse this PC and point the app at folders that already exist

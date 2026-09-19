@@ -10,4 +10,16 @@ Put recommended / plan-value workbooks here.
 
 Supported: `.xlsx` `.xlsb` `.xlsm`
 
-Typical headers (names can vary): Function, MML Object, Parameter ID, Recommend Value / Plan Value.
+Typical headers:
+
+- **Required identity columns:** MML Object, Parameter ID, Parameter Name
+- Value column (detected automatically): Proposed Value, Recommended Value, Plan Value, …
+
+`Parameter Name` is the dump display name and is used first to find the field. `Parameter ID` may be `SwitchName@Attribute` — before `@` is the switch/bit, after `@` is the parameter.
+
+Band/group conditions in Proposed/Recommended Value are applied per cell, for example:
+
+- `L9:1` / `L18:20` / `L21:20` / `L26:35`
+- `(InterFreqHoGroupId=1)=>L09=-108`
+- `(InterRatHoCommGroupId=1)=>L18=-112`
+
