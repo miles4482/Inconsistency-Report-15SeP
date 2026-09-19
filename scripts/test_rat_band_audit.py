@@ -69,6 +69,18 @@ def test_recommend_parser():
     value, _note = smart.select_recommend(spec, ctx900)
     assert value == "1"
 
+    oneline = smart.parse_recommend("L9: -74 L18:-118 L21:-118 L26:-115")
+    assert oneline.has_conditional
+    assert len([r for r in oneline.rules if r.band_token]) == 4
+    value, note = smart.select_recommend(oneline, ctx900)
+    assert value == "-74"
+    ctx18 = smart.RowContext(band_family="L1800", band_tokens=smart.tokens_for_family("L1800", 3))
+    value, _note = smart.select_recommend(oneline, ctx18)
+    assert value == "-118"
+    ctx26 = smart.RowContext(band_family="L2600", band_tokens=smart.tokens_for_family("L2600", 41))
+    value, _note = smart.select_recommend(oneline, ctx26)
+    assert value == "-115"
+
     grouped = smart.parse_recommend(
         "(InterFreqHoGroupId=1)=>L09=-108\n"
         "(InterFreqHoGroupId=1)=>L18=-108\n"
@@ -117,6 +129,96 @@ def test_three_identity_columns():
 
 
 def test_fuzzy_names():
+    hit, score, why = smart.closest_name("CelAlgoSwitch", ["CellAlgoSwitch", "CellMLB"], cutoff=0.8)
+    assert hit == "CellAlgoSwitch"
+    hit, score, why = smart.closest_name("NRDU CEL", ["NRDUCell", "Cell"], cutoff=0.8)
+    assert smart.norm_key(hit) == "NRDUCELL"
+
+
+def test_a1_not_matched_as_a2():
+    headers = [
+        "AAAS Based Interfreq A1 RSRP Threshold(dBm)",
+        "AAAS Based Interfreq A2 RSRP Threshold(dBm)",
+    ]
+    hit, score, why = smart.closest_name("AAAS Based Interfreq A1 RSRP Threshold", headers, cutoff=0.8)
+    assert "A1" in hit
+    assert "A2" not in hit
+    assert why == "exact"
+
+
+def test_cell_band_map_only_reads_cell_sheets():
+    def payload(headers, rows):
+        header_norm = {smart.norm_key(h): i for i, h in enumerate(headers)}
+        return {
+            "headers": headers,
+            "header_index": {h: i for i, h in enumerate(headers)},
+            "header_norm": header_norm,
+            "rows": rows,
+            "identity_idx": smart.identity_indexes(header_norm, fuzzy=False),
+        }
+
+    sheets = {
+        "Cell": payload(
+            ["*eNodeB Name", "*Local cell ID", "Frequency band"],
+            [[None, 11, 8], [None, 14, 3], [None, 20, 1], [None, 74, 41]],
+        ),
+        "InterFreqHoGroup": payload(
+            ["*eNodeB Name", "*Local cell ID", "AAAS Based Interfreq A1 RSRP Threshold(dBm)"],
+            [[None, 11, -74], [None, 14, -118]],
+        ),
+        "NRDUCell": payload(
+            ["*gNodeB Name", "*NR DU Cell ID", "*Frequency Band"],
+            [[None, 102, "N41"]],
+        ),
+        "MAPPING DEF": payload(["SHEETNAME", "GROUP", "COLUMN", "MOC", "ATTR"], []),
+    }
+
+    class SpyCache:
+        def __init__(self):
+            self.got = []
+
+        def names(self):
+            return list(sheets)
+
+        def get(self, name):
+            self.got.append(name)
+            return sheets.get(name)
+
+    spy = SpyCache()
+    index = audit.CellBandIndex(spy)
+    assert "Cell" in spy.got
+    assert "NRDUCell" in spy.got
+    assert "InterFreqHoGroup" not in spy.got
+    assert "MAPPING DEF" not in spy.got
+    assert "11" in index.by_cell_id
+    ho_row = sheets["InterFreqHoGroup"]
+    ctx = smart.cell_from_row(ho_row["headers"], ho_row["header_norm"], ho_row["rows"][0], indexes=ho_row["identity_idx"])
+    assert not ctx.band_tokens
+    ctx = index.enrich(ctx)
+    assert smart.band_matches("L09", ctx.band_tokens)
+
+    class FakeCache:
+        def get(self, name):
+            return sheets[name]
+
+    param = {
+        "pid": "InterFreqHOA1ThdRsrp",
+        "param_name": "AAAS Based Interfreq A1 RSRP Threshold",
+        "recommend": "L9: -74 L18:-118 L21:-118 L26:-115",
+        "mml": "InterFreqHoGroup",
+    }
+    resolved = {
+        "reason": "OK",
+        "sheet": "InterFreqHoGroup",
+        "column": "AAAS Based Interfreq A1 RSRP Threshold",
+        "bit": None,
+        "smart_note": "",
+    }
+    out = audit.compare_param(param, resolved, FakeCache(), cell_index=index)
+    assert out["status"] == "Consistent"
+    assert out["match_count"] == 2
+    assert out["mismatch_count"] == 0
+    assert "L9" in (out.get("applied_recommend") or "") or "L09" in (out.get("applied_recommend") or "")
     hit, score, why = smart.closest_name("CelAlgoSwitch", ["CellAlgoSwitch", "CellMLB"], cutoff=0.8)
     assert hit == "CellAlgoSwitch"
     hit, score, why = smart.closest_name("NRDU CEL", ["NRDUCell", "Cell"], cutoff=0.8)
@@ -368,12 +470,20 @@ def _build_4g_dump(path: Path):
         wb,
         "InterFreqHoGroup",
         [
-            ["MODIND", "ENODEBNAME", "LOCALCELLID", "INTERFREQHOGROUPID", "A3OFFSET"],
-            ["*eNodeB Name", "*eNodeB Name", "*Local cell ID", "*Interfreq handover group ID", "A3 Offset"],
-            [None, "DHAPT08", 11, 1, -108],
-            [None, "DHAPT08", 14, 1, -108],
-            [None, "DHAPT08", 20, 1, -100],
-            [None, "DHAPT08", 74, 0, -108],
+            ["MODIND", "ENODEBNAME", "LOCALCELLID", "INTERFREQHOGROUPID", "A3OFFSET", "INTERFREQHOA1THDRSRP", "INTERFREQHOA2THDRSRP"],
+            [
+                "*eNodeB Name",
+                "*eNodeB Name",
+                "*Local cell ID",
+                "*Interfreq handover group ID",
+                "A3 Offset",
+                "AAAS Based Interfreq A1 RSRP Threshold(dBm)",
+                "AAAS Based Interfreq A2 RSRP Threshold(dBm)",
+            ],
+            [None, "DHAPT08", 11, 1, -108, -74, -99],
+            [None, "DHAPT08", 14, 1, -108, -118, -99],
+            [None, "DHAPT08", 20, 1, -100, -118, -99],
+            [None, "DHAPT08", 74, 0, -108, -115, -99],
         ],
     )
     _save(wb, path)
@@ -431,6 +541,13 @@ def _build_reference(path: Path):
                 "A3 Offset",
                 "",
                 "(InterFreqHoGroupId=1)=>L09=-108\n(InterFreqHoGroupId=1)=>L18=-108\n(InterFreqHoGroupId=1)=>L21=-108",
+            ],
+            [
+                "InterFreqHoGroup",
+                "InterFreqHOA1ThdRsrp",
+                "AAAS Based Interfreq A1 RSRP Threshold",
+                "",
+                "L9: -74 L18:-118 L21:-118 L26:-115",
             ],
         ],
     )
@@ -532,6 +649,12 @@ def test_end_to_end_audit():
         # group 0 cell skipped; L21 group 1 has -100 vs -108
         assert int(group["mismatch_count"]) >= 1
 
+        a1 = next(p for p in params if p["parameter_id"] == "InterFreqHOA1ThdRsrp")
+        assert a1["status"] == "Consistent"
+        assert int(a1["match_count"]) == 4
+        assert int(a1["mismatch_count"]) == 0
+        assert "A2" not in (a1.get("config_column") or "")
+
         legacy = next(p for p in params if p["reference_sheet"] == "Legacy")
         assert legacy["status"] in {"Mixed / Partial", "Inconsistent", "Consistent"}
 
@@ -584,6 +707,8 @@ def main() -> int:
     test_recommend_parser()
     test_three_identity_columns()
     test_fuzzy_names()
+    test_a1_not_matched_as_a2()
+    test_cell_band_map_only_reads_cell_sheets()
     test_simple_compare_is_fast()
     test_switch_bits_inside_parameter_column()
     test_list_workbooks_rats()

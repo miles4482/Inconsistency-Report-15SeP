@@ -822,46 +822,45 @@ def object_label(row, headers, ctx=None):
 
 
 class CellBandIndex:
-    """Map eNodeB/gNodeB + cell ID to frequency band and Comm/Ho group IDs."""
+    """Map Local cell ID → L09/L18/L21/L26 from Cell (4G) and NRDUCELL (5G) only.
+
+    Other MO sheets are not loaded. Group IDs are read from the current
+    parameter row when that sheet has them.
+    """
 
     def __init__(self, cache: SheetCache):
         self.by_key = {}
-        self.groups_by_key = defaultdict(lambda: defaultdict(set))
+        self.by_cell_id = {}
+        self._loaded_sheets = []
         self._build(cache)
 
     def _sheet_role(self, sheet_name: str) -> str | None:
         nk = norm_key(sheet_name)
         cell_names = {"CELL", *{norm_key(a) for a in smart.SHEET_ALIASES["CELL"]}}
         nr_names = {"NRDUCELL", *{norm_key(a) for a in smart.SHEET_ALIASES["NRDUCELL"]}}
-        group_names = {
-            "INTERFREQHOGROUP",
-            "INTERRATHOCOMM",
-            *{norm_key(a) for a in smart.SHEET_ALIASES["INTERFREQHOGROUP"]},
-            *{norm_key(a) for a in smart.SHEET_ALIASES["INTERRATHOCOMM"]},
-        }
         if nk in cell_names:
             return "cell"
         if nk in nr_names:
             return "nrducell"
-        if nk in group_names:
-            return "group"
         return None
 
     def _build(self, cache: SheetCache):
         for sheet_name in cache.names():
             role = self._sheet_role(sheet_name)
-            if not role:
+            if role not in {"cell", "nrducell"}:
                 continue
             payload = cache.get(sheet_name)
             if not payload:
                 continue
+            self._loaded_sheets.append(sheet_name)
             for row in payload["rows"]:
                 ctx = smart.cell_from_row(
                     payload["headers"], payload["header_norm"], row, indexes=payload.get("identity_idx")
                 )
-                if not ctx.cell_key:
+                if not ctx.cell_id:
                     continue
-                if role in {"cell", "nrducell"}:
+                cid = norm_key(ctx.cell_id)
+                if ctx.cell_key:
                     existing = self.by_key.get(ctx.cell_key)
                     if existing is None:
                         self.by_key[ctx.cell_key] = ctx
@@ -871,17 +870,15 @@ class CellBandIndex:
                             existing.band_family = ctx.band_family
                         if not existing.band_raw:
                             existing.band_raw = ctx.band_raw
-                        if not existing.cell_name:
-                            existing.cell_name = ctx.cell_name
-                if ctx.groups:
-                    for gname, ids in ctx.groups.items():
-                        self.groups_by_key[ctx.cell_key][gname] |= set(ids)
+                if cid and cid not in self.by_cell_id:
+                    self.by_cell_id[cid] = ctx
 
     def enrich(self, ctx: smart.RowContext) -> smart.RowContext:
-        key = ctx.cell_key
-        if not key:
-            return ctx
-        indexed = self.by_key.get(key)
+        indexed = None
+        if ctx.cell_key:
+            indexed = self.by_key.get(ctx.cell_key)
+        if indexed is None and ctx.cell_id:
+            indexed = self.by_cell_id.get(norm_key(ctx.cell_id))
         if indexed:
             if not ctx.band_tokens:
                 ctx.band_tokens = set(indexed.band_tokens)
@@ -889,8 +886,6 @@ class CellBandIndex:
                 ctx.band_raw = indexed.band_raw
             if not ctx.cell_name:
                 ctx.cell_name = indexed.cell_name
-        for gname, ids in self.groups_by_key.get(key, {}).items():
-            ctx.groups.setdefault(gname, set()).update(ids)
         return ctx
 
 
@@ -929,21 +924,17 @@ def compare_param(param, resolved, cache, cell_index=None):
         return out
 
     col = resolved["column"]
-    col_idx = sheet["header_index"].get(col)
-    if col_idx is None:
-        col_idx = sheet["header_norm"].get(norm_key(col))
+    col_idx = find_column_index(sheet, col)
     if col_idx is None:
         pname = clean_text(param.get("param_name"))
         if pname:
-            col_idx = sheet["header_index"].get(pname)
-            if col_idx is None:
-                col_idx = sheet["header_norm"].get(norm_key(pname))
+            col_idx = find_column_index(sheet, pname)
             if col_idx is None:
                 hit, _score, why = smart.closest_name(
                     pname, sheet["headers"], cutoff=0.8
                 )
                 if hit:
-                    col_idx = sheet["header_index"].get(hit)
+                    col_idx = find_column_index(sheet, hit) or sheet["header_index"].get(hit)
                     out["remark"] = (
                         (out["remark"] + " | " if out["remark"] and out["remark"] != "OK" else "")
                         + f"Interpreted column '{pname}' as '{hit}' ({why})"
@@ -1322,7 +1313,15 @@ def find_column_index(sheet, name: str):
     idx = sheet["header_index"].get(name)
     if idx is not None:
         return idx
-    return sheet["header_norm"].get(norm_key(name))
+    idx = sheet["header_norm"].get(norm_key(name))
+    if idx is not None:
+        return idx
+    wanted = smart.header_match_key(name)
+    if wanted:
+        for header in sheet.get("headers") or []:
+            if smart.header_match_key(header) == wanted:
+                return sheet["header_index"].get(header)
+    return None
 
 
 def resolve_by_sheet_name(param, workbook_names, cache):
@@ -1422,18 +1421,26 @@ class InputWorkbook:
     def __init__(self, path: Path):
         self.path = Path(path)
         self.cache = SheetCache(self.path)
-        self.mapping = None
+        self._mapping = None
+        self._mapping_loaded = False
         self._cell_index = None
-        names = self.cache.names()
-        if any(norm_key(n) == "MAPPINGDEF" for n in names):
-            mapping_name = next(n for n in names if norm_key(n) == "MAPPINGDEF")
+
+    @property
+    def mapping(self):
+        if not self._mapping_loaded:
+            self._mapping_loaded = True
             try:
-                self.mapping = load_mapping(self.path) if mapping_name == "MAPPING DEF" else load_mapping(self.path)
+                names = self.cache.names()
             except Exception:
+                names = []
+            if any(norm_key(n) == "MAPPINGDEF" for n in names):
                 try:
-                    self.mapping = load_mapping(self.path)
+                    self._mapping = load_mapping(self.path)
                 except Exception:
-                    self.mapping = None
+                    self._mapping = None
+            else:
+                self._mapping = None
+        return self._mapping
 
     def cell_index(self) -> CellBandIndex:
         if self._cell_index is None:
@@ -2171,6 +2178,7 @@ def write_excel(params, summary, func_summary, run: RunContext):
         "- Every reference workbook is fully analyzed. Every input workbook is searched for each parameter.",
         "- Sheet names in input dumps that match an MO / MML Object name are treated as that object.",
         "- Huawei dumps with a MAPPING DEF sheet are mapped by MOC/attribute; other workbooks use sheet and column names.",
+        "- Band-conditional values (L9:-74 L18:-118 …) use Local cell ID looked up in Cell (4G) / NRDUCELL (5G) only. Other MO sheets are not preloaded for band mapping.",
         "- Switch bits are extracted from Huawei bit-pack strings (NAME-1&NAME-0). Recommend may name the bit as SwitchName-0 / SwitchName-1 (or several joined by &) against Parameter Name; Parameter ID BIT@Attribute still works.",
         "- Mixed / Partial means some cells or sites match the recommend value and others do not; these are counted as inconsistency.",
         "- Empty Recommend Value in the reference file cannot be judged; they are excluded from the inconsistency rate.",
@@ -2654,9 +2662,15 @@ def execute_folder_audit(
             "No reference parameters found. Each reference sheet needs headers such as "
             "Function / MML Object / Parameter ID / Parameter Name, with Proposed or Recommend Value found adaptively."
         )
-    progress("Indexing every input workbook (Cell / NRDUCell bands, MAPPING DEF, sheet name as MO)...")
+    progress("Mapping Local cell ID to L09/L18/L21/L26 from Cell (4G) and NRDUCELL (5G) only...")
     store = InputStore(input_files)
-    progress("Resolving and comparing each reference parameter against selected input files...")
+    for wb in store.workbooks:
+        band_map = wb.cell_index()
+        progress(
+            f"  {workbook_rel_label(wb.path, input_folder)}: "
+            f"{len(band_map.by_cell_id)} cells from {', '.join(band_map._loaded_sheets) or 'no Cell/NRDUCELL sheet'}"
+        )
+    progress("Comparing each reference parameter against selected input files...")
     for i, param in enumerate(params, start=1):
         resolved, result = store.compare_param(param)
         param["resolved"] = resolved

@@ -105,16 +105,20 @@ FALSE_SET = {"0", "0.0", "OFF", "FALSE", "NO", "DISABLE", "DISABLED"}
 UNIT_RE = re.compile(r"^(-?\d+(?:\.\d+)?)(MS|S|DBM|DB|MHZ|KHZ|MIN|DAY)?$", re.I)
 NON_ALNUM = re.compile(r"[^A-Z0-9]+")
 
-BAND_TOKEN_RE = re.compile(
-    r"\b(L0?9(?:00)?|L18(?:00)?|L21(?:00)?|L26(?:00)?|N\d{1,3}|B\d{1,3})\b",
-    re.I,
-)
+BAND_TOKEN = r"(?:L0?9(?:00)?|L18(?:00)?|L21(?:00)?|L26(?:00)?|N\d{1,3}|B\d{1,3})"
+BAND_TOKEN_RE = re.compile(rf"\b({BAND_TOKEN})\b", re.I)
 BAND_VALUE_RE = re.compile(
-    r"\b(L0?9(?:00)?|L18(?:00)?|L21(?:00)?|L26(?:00)?|N\d{1,3}|B\d{1,3})"
-    r"(?:\s*/\s*(?:L0?9(?:00)?|L18(?:00)?|L21(?:00)?|L26(?:00)?|N\d{1,3}|B\d{1,3}))*"
-    r"\s*[:=]\s*([^\n;]+)",
+    rf"\b({BAND_TOKEN})(?:\s*/\s*{BAND_TOKEN})*\s*[:=\uff1a]\s*(.+?)"
+    rf"(?=\s+{BAND_TOKEN}\s*[:=\uff1a]|$|\n|;|,)",
     re.I,
 )
+BAND_SPLIT_RE = re.compile(
+    rf"(?<=\S)[\s,]+(?=({BAND_TOKEN})(?:\s*/\s*{BAND_TOKEN})*\s*[:=\uff1a])",
+    re.I,
+)
+METRIC_DISC_RE = re.compile(r"\b([AB]\d+)\b", re.I)
+UNIT_PARENS_RE = re.compile(r"\([^)]*\)")
+UNIT_TAIL_RE = re.compile(r"(DBM|DB|MHZ|KHZ|MS|MIN|SEC)$")
 GROUP_LINE_RE = re.compile(
     r"\(\s*([A-Za-z][A-Za-z0-9_]*)\s*=\s*([^)]+?)\s*\)\s*(?:=>|=)?\s*(.*)$",
 )
@@ -163,12 +167,26 @@ def similarity(left: str, right: str) -> float:
     return ratio
 
 
+def header_match_key(value) -> str:
+    """Normalize a header so 'A1 RSRP Threshold' matches 'A1 RSRP Threshold(dBm)'."""
+    text = UNIT_PARENS_RE.sub("", clean_text(value))
+    key = norm_key(text)
+    return UNIT_TAIL_RE.sub("", key)
+
+
+def metric_discs(value) -> set[str]:
+    """A1 vs A2 (and B1 vs B2) so fuzzy match cannot pick the neighbour column."""
+    return {m.group(1).upper() for m in METRIC_DISC_RE.finditer(clean_text(value))}
+
+
 def closest_name(query: str, candidates: Iterable[str], *, cutoff: float = 0.78):
     """Return (match, score, reason) or (None, 0, '')."""
     q = clean_text(query)
     if not q:
         return None, 0.0, ""
     qn = norm_key(q)
+    qh = header_match_key(q)
+    q_disc = metric_discs(q)
     unique = []
     seen = set()
     for raw in candidates:
@@ -180,8 +198,12 @@ def closest_name(query: str, candidates: Iterable[str], *, cutoff: float = 0.78)
             continue
         seen.add(key)
         unique.append(text)
+    if q_disc:
+        filtered = [c for c in unique if not metric_discs(c) or metric_discs(c) == q_disc]
+        if filtered:
+            unique = filtered
     for cand in unique:
-        if norm_key(cand) == qn:
+        if norm_key(cand) == qn or header_match_key(cand) == qh:
             return cand, 1.0, "exact"
     alias_hit = _alias_lookup(qn)
     if alias_hit:
@@ -322,7 +344,9 @@ class RecommendSpec:
 
 def _split_recommend_lines(text: str) -> list[str]:
     blob = text.replace("\r\n", "\n").replace("\r", "\n")
+    blob = blob.replace("\u2212", "-").replace("\u2013", "-").replace("\uff1a", ":")
     blob = blob.replace(")(", ")\n(")
+    blob = BAND_SPLIT_RE.sub("\n", blob)
     parts = []
     for chunk in re.split(r"[\n;]+", blob):
         chunk = chunk.strip().strip(",")
@@ -335,6 +359,8 @@ def _looks_conditional(text: str) -> bool:
     if "(" in text and "=" in text and ")" in text:
         return True
     if BAND_VALUE_RE.search(text):
+        return True
+    if re.search(rf"\b{BAND_TOKEN}\b", text, re.I) and re.search(r"-?\d", text):
         return True
     return False
 
