@@ -490,7 +490,8 @@ def launch_gui():
         "2. Reference Folder  (recommended / plan values)",
         reference_var,
         "Select Reference Folder — every workbook is a reference",
-        "Any file names (2, 3, 4… files). Different sheet names and many columns. Every file is analyzed against the Input Folder.",
+        "Any file names (2, 3, 4… files). The three columns used to find each parameter are "
+        "MML Object, Parameter ID, and Parameter Name. Proposed / Recommend values and other columns are detected automatically.",
     )
     out_frame = tk.LabelFrame(body, text="3. Output Folder  (inconsistency reports)", padx=8, pady=6)
     out_frame.pack(fill=tk.X, pady=(0, 8))

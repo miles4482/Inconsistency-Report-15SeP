@@ -66,8 +66,9 @@ Latest copies:
 - Tick **5G / 4G / 3G / 2G** so only those `Input` subfolders are searched.
 - Input sheet names that match an MO / MML Object name are treated as that object.
 - Huawei dumps with a `MAPPING DEF` sheet are mapped by MOC and attribute.
+- **MML Object**, **Parameter ID**, and **Parameter Name** are the three columns used to find each parameter in the dump. Other reference columns (Proposed / Recommended / Plan value, bands, groups) are detected automatically.
 - `Parameter ID` of the form `SwitchName@Attribute`: before `@` is the switch/bit, after `@` is the parameter (column).
-- `Parameter Name` is the dump display name. On Proposed Value / MO Name sheets, a missing Parameter Name column is reported as **No recommended value**.
+- `Parameter Name` is the dump display name and is matched first.
 - 4G `Cell` maps `eNodeB Name + Local Cell ID` and Frequency band 8/3/1/41 to L09/L18/L21/L26. 5G `NRDUCell` maps `gNodeB Name + NR DU Cell ID` (N41 → L26 family).
 - Proposed values such as `L18:20` or `(InterFreqHoGroupId=1)=>L09=-108` are applied only to cells where that band/group applies. CommGroupId / InterRatHoCommGroupId rules use every listed band.
 - Built-in name thinking (aliases + fuzzy match) corrects mistyped MO / parameter / sheet names. No cloud AI is used.

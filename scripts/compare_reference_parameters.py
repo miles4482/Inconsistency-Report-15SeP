@@ -652,8 +652,8 @@ def resolve_parameter(param, mapping):
         "reason": "",
         "smart_note": "",
     }
-    if not mml or not pid:
-        result["reason"] = "Missing MML Object or Parameter ID"
+    if not mml or (not pid and not pname):
+        result["reason"] = "Missing MML Object, or both Parameter ID and Parameter Name"
         return result
 
     notes = []
@@ -697,11 +697,13 @@ def resolve_parameter(param, mapping):
             return rec
         return None
 
-    rec = locate(attr_name)
-    if rec is None and pname:
+    rec = None
+    if pname:
         rec = locate(pname)
         if rec:
-            notes.append(f"Matched dump field using Parameter Name '{pname}'")
+            notes.append(f"Matched dump using Parameter Name '{pname}'")
+    if rec is None and attr_name:
+        rec = locate(attr_name)
     if rec is None and bit_name:
         swapped = locate(bit_name)
         if swapped:
@@ -1014,16 +1016,87 @@ def compare_param(param, resolved, cache, cell_index=None):
     return out
 
 
+IDENTITY_REF_FIELDS = ("mml", "pid", "param_name")
+HEADER_PROBES = {
+    "mml": ("MML Object", "MO Name", "MML Object Name", "Managed Object", "MOC"),
+    "pid": ("Parameter ID", "Param ID", "Para ID", "ParameterId"),
+    "param_name": ("Parameter Name", "Param Name", "Display Name", "Full Name"),
+    "recommend": (
+        "Proposed Value",
+        "Recommended Value",
+        "Recommend Value",
+        "Plan Value",
+        "Target Value",
+        "Golden Value",
+        "Expected Value",
+    ),
+}
+SKIP_AS_RECOMMEND = {
+    "DEFAULTVALUE",
+    "DEFAULT",
+    "FUNCTION",
+    "FEATURE",
+    "REMARK",
+    "REMARKS",
+    "COMMENT",
+    "COMMENTS",
+    "NOTE",
+    "NOTES",
+    "UNIT",
+    "UNITS",
+    "DESCRIPTION",
+    "RANGE",
+}
+
+
 def detect_ref_header_map(header_row) -> dict:
+    """Map the three identity columns plus an adaptive recommend column.
+
+    Identity (always expected): MML Object, Parameter ID, Parameter Name.
+    Recommend / Proposed / Plan is found adaptively from the remaining headers.
+    """
     mapping = {}
+    used = set()
+    cells = []
     for i, cell in enumerate(header_row or []):
+        text = clean_text(cell)
         key = norm_key(cell)
+        cells.append((i, text, key))
         if not key:
             continue
         for field, aliases in REF_HEADER_ALIASES.items():
             if key in aliases and field not in mapping:
                 mapping[field] = i
+                used.add(i)
+                break
+    unused = [(i, text) for i, text, key in cells if i not in used and text]
+    for field, probes in HEADER_PROBES.items():
+        if field in mapping:
+            continue
+        best_i = None
+        best_score = 0.0
+        for i, text in unused:
+            if field == "recommend" and norm_key(text) in SKIP_AS_RECOMMEND:
+                continue
+            for probe in probes:
+                score = smart.similarity(text, probe)
+                if score > best_score:
+                    best_i, best_score = i, score
+        if best_i is not None and best_score >= 0.78:
+            mapping[field] = best_i
+            used.add(best_i)
+            unused = [(i, text) for i, text in unused if i != best_i]
     return mapping
+
+
+def is_identity_ref_header(mapping: dict) -> bool:
+    return all(field in mapping for field in IDENTITY_REF_FIELDS)
+
+
+def is_usable_ref_header(mapping: dict) -> bool:
+    if is_identity_ref_header(mapping):
+        return True
+    return "pid" in mapping and "mml" in mapping and "recommend" in mapping
 
 
 def is_skipped_ref_sheet(sheet_name: str) -> bool:
@@ -1056,15 +1129,25 @@ def load_reference_file(ref_path: Path, ref_count: int = 1):
             continue
         header_idx = None
         header_map = None
+        best_score = -1
         for i, row in enumerate(rows[:12]):
             candidate = detect_ref_header_map(row)
-            if "pid" in candidate and ("recommend" in candidate or "mml" in candidate):
+            if not is_usable_ref_header(candidate):
+                continue
+            score = (
+                (3 if "mml" in candidate else 0)
+                + (3 if "pid" in candidate else 0)
+                + (3 if "param_name" in candidate else 0)
+                + (1 if "recommend" in candidate else 0)
+            )
+            if score > best_score:
+                best_score = score
                 header_idx = i
                 header_map = candidate
-                break
         if header_map is None:
             continue
         sheet_as_mo = "mml" not in header_map
+        missing_name_col = "param_name" not in header_map
         for offset, row in enumerate(rows[header_idx + 1 :], start=header_idx + 2):
             def cell(field):
                 idx = header_map.get(field)
@@ -1074,28 +1157,26 @@ def load_reference_file(ref_path: Path, ref_count: int = 1):
 
             mml = clean_text(cell("mml"))
             pid = clean_text(cell("pid"))
-            if is_empty(mml) and is_empty(pid):
+            pname = clean_text(cell("param_name"))
+            if is_empty(mml) and is_empty(pid) and is_empty(pname):
                 continue
-            if is_empty(pid):
+            if is_empty(pid) and is_empty(pname):
                 continue
             if is_empty(mml):
                 mml = sheet_name
                 sheet_as_mo = True
             rec = cell("recommend")
-            pname = clean_text(cell("param_name"))
-            new_style = smart.is_new_style_ref_headers(rows[header_idx])
-            missing_name_col = "param_name" not in header_map
             no_recommend_reason = None
+            new_style = smart.is_new_style_ref_headers(rows[header_idx])
             if missing_name_col and new_style:
                 rec = None
                 no_recommend_reason = (
-                    "No Parameter Name column on this sheet. "
-                    "Add Parameter Name along with Parameter ID."
+                    "No Parameter Name column. Add MML Object, Parameter ID, and Parameter Name."
                 )
-            elif "param_name" in header_map and is_empty(pname) and new_style:
+            elif missing_name_col is False and is_empty(pname):
                 rec = None
                 no_recommend_reason = (
-                    "Parameter Name is empty. Add Parameter Name along with Parameter ID."
+                    "Parameter Name is empty. Add Parameter Name along with MML Object and Parameter ID."
                 )
             sheet_key = sheet_name if ref_count <= 1 else f"{ref_path.name} | {sheet_name}"
             params.append(
@@ -1159,8 +1240,8 @@ def resolve_by_sheet_name(param, workbook_names, cache):
     pid = clean_text(param.get("pid"))
     pname = clean_text(param.get("param_name"))
     notes = []
-    if not pid:
-        result["reason"] = "Missing Parameter ID"
+    if not pid and not pname:
+        result["reason"] = "Missing Parameter ID and Parameter Name"
         return result
     name_index = {norm_key(n): n for n in workbook_names if not is_skipped_ref_sheet(n) and norm_key(n) not in {norm_key(s) for s in META_SHEETS}}
     sheet = name_index.get(norm_key(mml)) if mml else None
@@ -1260,6 +1341,9 @@ class InputWorkbook:
         return self._cell_index
 
     def resolve(self, param) -> dict:
+        by_name = resolve_by_sheet_name(param, self.cache.names(), self.cache)
+        if by_name.get("reason") == "OK":
+            return by_name
         moc_key = norm_key(param.get("mml"))
         if self.mapping:
             mo_known = (
@@ -1280,7 +1364,7 @@ class InputWorkbook:
                 resolved = resolve_parameter(param, self.mapping)
                 if resolved.get("reason") == "OK":
                     return resolved
-        return resolve_by_sheet_name(param, self.cache.names(), self.cache)
+        return by_name
 
 
 class InputStore:
@@ -2464,8 +2548,7 @@ def execute_folder_audit(
     if not params:
         raise ValueError(
             "No reference parameters found. Each reference sheet needs headers such as "
-            "Function / MML Object / Parameter ID / Recommend Value, or MO Name / Parameter ID / "
-            "Parameter Name / Proposed Value."
+            "Function / MML Object / Parameter ID / Parameter Name, with Proposed or Recommend Value found adaptively."
         )
     progress("Indexing every input workbook (Cell / NRDUCell bands, MAPPING DEF, sheet name as MO)...")
     store = InputStore(input_files)

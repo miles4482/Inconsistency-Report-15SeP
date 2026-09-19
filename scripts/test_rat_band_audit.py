@@ -99,6 +99,23 @@ def test_recommend_parser():
     assert value == "-110"
 
 
+def test_three_identity_columns():
+    headers = ["MML Object", "Parameter ID", "Parameter Name", "Golden"]
+    mapping = audit.detect_ref_header_map(headers)
+    assert mapping["mml"] == 0
+    assert mapping["pid"] == 1
+    assert mapping["param_name"] == 2
+    assert mapping["recommend"] == 3
+    assert audit.is_identity_ref_header(mapping)
+
+    odd = ["MO Name", "Param ID", "Param Name", "Default Value", "Target Value"]
+    mapping2 = audit.detect_ref_header_map(odd)
+    assert "mml" in mapping2 and "pid" in mapping2 and "param_name" in mapping2
+    assert "recommend" in mapping2
+    # Default Value must not be treated as the recommend/proposed value
+    assert mapping2["recommend"] == 4
+
+
 def test_fuzzy_names():
     hit, score, why = smart.closest_name("CelAlgoSwitch", ["CellAlgoSwitch", "CellMLB"], cutoff=0.8)
     assert hit == "CellAlgoSwitch"
@@ -267,6 +284,19 @@ def _build_reference(path: Path):
             ["Idle", "CellMLB", "InterFreqIdleMlbUeNumThd", "20"],
         ],
     )
+    _write_sheet(
+        wb,
+        "Three Keys",
+        [
+            ["MML Object", "Parameter ID", "Parameter Name", "Golden"],
+            [
+                "CellAlgoSwitch",
+                "SpectralETBasedLoadEvalSw@EnhancedMlbAlgoSwitch",
+                "Enhanced MLB Algorithm Switch",
+                "1",
+            ],
+        ],
+    )
     _save(wb, path)
 
 
@@ -321,6 +351,11 @@ def test_end_to_end_audit():
         legacy = next(p for p in params if p["reference_sheet"] == "Legacy")
         assert legacy["status"] in {"Mixed / Partial", "Inconsistent", "Consistent"}
 
+        three = next(p for p in params if p["reference_sheet"] == "Three Keys")
+        assert three["parameter_name"] == "Enhanced MLB Algorithm Switch"
+        assert three["status"] in {"Mixed / Partial", "Inconsistent", "Consistent"}
+        assert int(three["objects_checked"]) >= 1
+
         assert run.out_xlsx.exists()
         assert "4G" in ",".join(run.selected_rats)
 
@@ -336,6 +371,7 @@ def main() -> int:
     test_rats_and_split()
     test_band_families()
     test_recommend_parser()
+    test_three_identity_columns()
     test_fuzzy_names()
     test_list_workbooks_rats()
     test_end_to_end_audit()

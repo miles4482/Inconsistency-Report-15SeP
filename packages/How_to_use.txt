@@ -41,9 +41,10 @@ How to run
      - 4G Cell sheet maps eNodeB + Local Cell ID to L09/L18/L21/L26
      - 5G NRDUCell sheet maps gNodeB + NR DU Cell ID to the NR band
 3. Put every recommended / plan-value workbook into Reference\
-     - Parameter Name = dump display name
+     - Always include these three columns: MML Object, Parameter ID, Parameter Name
+     - Parameter Name = dump display name (used to find the field in Input)
      - Parameter ID may be SwitchName@Attribute (before @ = switch, after @ = parameter)
-     - If Parameter Name is missing on a Proposed Value sheet, the report says No recommended value
+     - Proposed / Recommended / Plan value columns are detected automatically
      - Band/group conditions such as L9:1 or (InterFreqHoGroupId=1)=>L09=-108 are applied per cell
 4. Put a license file next to ParameterAudit.exe (.lic or .json or .txt). No rename required.
    Or click Load license file… and pick the file.
