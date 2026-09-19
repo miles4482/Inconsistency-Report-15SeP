@@ -30,7 +30,7 @@ python3 scripts/license_generator_app.py
 
 ## Windows app
 
-Download [`packages/ParameterAudit_Windows.rar`](packages/ParameterAudit_Windows.rar), extract the folder, then run `ParameterAudit.exe`.
+Download [`packages/ParameterAudit_Windows_v1.5.0.rar`](packages/ParameterAudit_Windows_v1.5.0.rar) (also [`ParameterAudit_Windows.rar`](packages/ParameterAudit_Windows.rar)), extract the folder, then run `ParameterAudit.exe`. The window title shows **v1.5.0**.
 
 The extracted folder already contains `Input`, `Reference`, and `Output`. Drop files in, then Generate Report — or Browse this PC to other folders.
 

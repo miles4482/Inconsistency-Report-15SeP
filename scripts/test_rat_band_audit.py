@@ -123,6 +123,49 @@ def test_fuzzy_names():
     assert smart.norm_key(hit) == "NRDUCELL"
 
 
+def test_simple_compare_is_fast():
+    """Simple recommend values must not scan Cell/band context on every row."""
+    import time
+
+    rows = [["MODIND", "ENODEBNAME", "LOCALCELLID", "SOMEPARAM"]]
+    rows.append(["*eNodeB Name", "*eNodeB Name", "*Local cell ID", "Some Param"])
+    for i in range(4000):
+        rows.append([None, "SITE1", i, 1])
+    payload_headers = ["*eNodeB Name", "*eNodeB Name", "*Local cell ID", "Some Param"]
+    header_norm = {smart.norm_key(h): i for i, h in enumerate(payload_headers)}
+    sheet = {
+        "headers": payload_headers,
+        "header_index": {h: i for i, h in enumerate(payload_headers)},
+        "header_norm": header_norm,
+        "rows": rows[2:],
+        "identity_idx": smart.identity_indexes(header_norm, fuzzy=False),
+    }
+
+    class FakeCache:
+        def get(self, _name):
+            return sheet
+
+    param = {
+        "pid": "SomeParam",
+        "param_name": "Some Param",
+        "recommend": "1",
+        "mml": "CellAlgoSwitch",
+    }
+    resolved = {
+        "reason": "OK",
+        "sheet": "CellAlgoSwitch",
+        "column": "Some Param",
+        "bit": None,
+        "smart_note": "",
+    }
+    t0 = time.perf_counter()
+    out = audit.compare_param(param, resolved, FakeCache(), cell_index=None)
+    elapsed = time.perf_counter() - t0
+    assert out["status"] == "Consistent"
+    assert out["objects_checked"] == 4000
+    assert elapsed < 1.5, f"simple compare too slow: {elapsed:.2f}s"
+
+
 def test_list_workbooks_rats():
     with tempfile.TemporaryDirectory() as raw:
         root = Path(raw)
@@ -373,6 +416,7 @@ def main() -> int:
     test_recommend_parser()
     test_three_identity_columns()
     test_fuzzy_names()
+    test_simple_compare_is_fast()
     test_list_workbooks_rats()
     test_end_to_end_audit()
     print("rat-band-smart-audit tests passed")

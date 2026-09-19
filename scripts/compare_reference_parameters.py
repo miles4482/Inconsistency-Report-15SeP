@@ -34,6 +34,7 @@ from pyxlsb import open_workbook
 
 import license_control as license_mod
 import smart_match as smart
+from app_version import APP_TITLE, APP_VERSION
 
 
 WORKBOOK_SUFFIXES = {".xlsx", ".xlsb", ".xlsm"}
@@ -598,6 +599,7 @@ class SheetCache:
             "header_index": header_index,
             "header_norm": header_norm,
             "rows": records,
+            "identity_idx": smart.identity_indexes(header_norm, fuzzy=False),
         }
         self.cache[sheet_name] = payload
         return payload
@@ -772,21 +774,20 @@ class CellBandIndex:
 
     def _sheet_role(self, sheet_name: str) -> str | None:
         nk = norm_key(sheet_name)
-        if nk == "CELL" or nk in {norm_key(a) for a in smart.SHEET_ALIASES["CELL"]}:
+        cell_names = {"CELL", *{norm_key(a) for a in smart.SHEET_ALIASES["CELL"]}}
+        nr_names = {"NRDUCELL", *{norm_key(a) for a in smart.SHEET_ALIASES["NRDUCELL"]}}
+        group_names = {
+            "INTERFREQHOGROUP",
+            "INTERRATHOCOMM",
+            *{norm_key(a) for a in smart.SHEET_ALIASES["INTERFREQHOGROUP"]},
+            *{norm_key(a) for a in smart.SHEET_ALIASES["INTERRATHOCOMM"]},
+        }
+        if nk in cell_names:
             return "cell"
-        if nk == "NRDUCELL" or nk in {norm_key(a) for a in smart.SHEET_ALIASES["NRDUCELL"]}:
+        if nk in nr_names:
             return "nrducell"
-        if "INTERFREQHOGROUP" in nk:
+        if nk in group_names:
             return "group"
-        if "INTERRATHOCOMM" in nk:
-            return "group"
-        hit, _score, _why = smart.closest_name(
-            sheet_name,
-            ["Cell", "NRDUCell", "InterFreqHoGroup", "InterRatHoComm"],
-            cutoff=0.9,
-        )
-        if hit:
-            return self._sheet_role(hit)
         return None
 
     def _build(self, cache: SheetCache):
@@ -798,7 +799,9 @@ class CellBandIndex:
             if not payload:
                 continue
             for row in payload["rows"]:
-                ctx = smart.cell_from_row(payload["headers"], payload["header_norm"], row)
+                ctx = smart.cell_from_row(
+                    payload["headers"], payload["header_norm"], row, indexes=payload.get("identity_idx")
+                )
                 if not ctx.cell_key:
                     continue
                 if role in {"cell", "nrducell"}:
@@ -899,44 +902,52 @@ def compare_param(param, resolved, cache, cell_index=None):
     counts = Counter()
     mismatches = []
     applied_notes = Counter()
+    need_ctx = spec.has_conditional
+    indexes = sheet.get("identity_idx") if need_ctx else None
+    bit_name = resolved.get("bit")
     for row in sheet["rows"]:
         raw = row[col_idx] if col_idx < len(row) else None
         used = raw
         bit_state = ""
-        if resolved.get("bit"):
-            bit_val, bit_state = extract_bit(raw, resolved["bit"])
+        if bit_name:
+            bit_val, bit_state = extract_bit(raw, bit_name)
             if bit_state == "found":
                 used = bit_val
             elif bit_state == "not_bitfield":
                 used = raw
             else:
-                used = f"<BIT_MISSING:{resolved['bit']}>"
-                bits = parse_bitfield(raw) or {}
-                similar = [
-                    name
-                    for name in bits
-                    if resolved["bit"].replace("NSA_", "NR_") in name
-                    or name.endswith(norm_key(resolved["bit"])[-16:])
-                ]
-                if not similar:
-                    hit, _score, _why = smart.closest_name(resolved["bit"], bits.keys(), cutoff=0.8)
-                    if hit:
-                        similar = [hit]
-                if similar and "closest_bit" not in out:
-                    out["closest_bit"] = similar[0]
+                used = f"<BIT_MISSING:{bit_name}>"
+                if "closest_bit" not in out:
+                    bits = parse_bitfield(raw) or {}
+                    similar = [
+                        name
+                        for name in bits
+                        if bit_name.replace("NSA_", "NR_") in name
+                        or name.endswith(norm_key(bit_name)[-16:])
+                    ]
+                    if not similar:
+                        hit, _score, _why = smart.closest_name(bit_name, bits.keys(), cutoff=0.8)
+                        if hit:
+                            similar = [hit]
+                    if similar:
+                        out["closest_bit"] = similar[0]
         display = clean_text(used)
         if display == "":
             display = "<EMPTY>"
-        ctx = smart.cell_from_row(sheet["headers"], sheet["header_norm"], row)
-        if cell_index is not None:
-            ctx = cell_index.enrich(ctx)
-        expected, applied_note = smart.select_recommend(spec, ctx)
-        if spec.has_conditional and expected is None:
-            out["skipped_not_applicable"] += 1
-            continue
-        row_recommend = expected if spec.has_conditional else recommend
-        if spec.has_conditional and applied_note:
-            applied_notes[f"{applied_note}=>{row_recommend}"] += 1
+        ctx = None
+        if need_ctx:
+            ctx = smart.cell_from_row(sheet["headers"], sheet["header_norm"], row, indexes=indexes)
+            if cell_index is not None:
+                ctx = cell_index.enrich(ctx)
+            expected, applied_note = smart.select_recommend(spec, ctx)
+            if expected is None:
+                out["skipped_not_applicable"] += 1
+                continue
+            row_recommend = expected
+            if applied_note:
+                applied_notes[f"{applied_note}=>{row_recommend}"] += 1
+        else:
+            row_recommend = recommend
         counts[display] += 1
         out["objects_checked"] += 1
         if is_empty(row_recommend):
@@ -1341,9 +1352,6 @@ class InputWorkbook:
         return self._cell_index
 
     def resolve(self, param) -> dict:
-        by_name = resolve_by_sheet_name(param, self.cache.names(), self.cache)
-        if by_name.get("reason") == "OK":
-            return by_name
         moc_key = norm_key(param.get("mml"))
         if self.mapping:
             mo_known = (
@@ -1364,7 +1372,7 @@ class InputWorkbook:
                 resolved = resolve_parameter(param, self.mapping)
                 if resolved.get("reason") == "OK":
                     return resolved
-        return by_name
+        return resolve_by_sheet_name(param, self.cache.names(), self.cache)
 
 
 class InputStore:
@@ -1412,7 +1420,12 @@ class InputStore:
             if resolved.get("reason") != "OK":
                 last_resolved = resolved
                 continue
-            result = compare_param(param, resolved, wb.cache, cell_index=wb.cell_index())
+            result = compare_param(
+                param,
+                resolved,
+                wb.cache,
+                cell_index=wb.cell_index() if smart.parse_recommend(param.get("recommend")).has_conditional else None,
+            )
             if result["status"] == "Not Found in Configuration" and result["objects_checked"] == 0:
                 last_resolved = resolved
                 last_resolved["reason"] = result.get("remark") or resolved.get("reason")
@@ -1605,7 +1618,7 @@ def files_banner(run: RunContext) -> str:
         names = [p.name for p in (run.cfg_4g, run.cfg_5g) if p]
         inputs = ", ".join(names)
     rats = ", ".join(run.selected_rats or smart.RAT_FOLDERS)
-    return f"Reference: {refs} | Input: {inputs} | Networks: {rats} | Run {run.run_id}"
+    return f"{APP_TITLE} | Reference: {refs} | Input: {inputs} | Networks: {rats} | Run {run.run_id}"
 
 
 def fill_header(ws, titles, fill, font):
@@ -2370,6 +2383,7 @@ def write_run_summary(summary, run: RunContext, param_count: int):
         "reference_files": [str(p) for p in run.reference_files],
         "input_files": [str(p) for p in run.input_files],
         "selected_rats": list(run.selected_rats),
+        "app_version": APP_VERSION,
         "parameter_count": param_count,
         "overall": dict(summary["ALL"]),
         "sheets": {key: dict(counter) for key, counter in summary.items() if key != "ALL"},
@@ -2487,6 +2501,7 @@ def execute_folder_audit(
     rats=None,
 ):
     license_info = license_mod.require_active_license(license_file)
+    progress(f"{APP_TITLE}")
     progress(f"License: {license_info.message}")
     selected_rats = smart.normalize_rats(rats)
     if not selected_rats:

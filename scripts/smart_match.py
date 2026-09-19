@@ -473,39 +473,55 @@ def select_recommend(spec: RecommendSpec, ctx: RowContext | None = None) -> tupl
     return value, "+".join(bits) or "conditional"
 
 
-def header_index_from_norm(header_norm: dict, keys: Iterable[str]):
+def header_index_from_norm(header_norm: dict, keys: Iterable[str], fuzzy: bool = False):
+    """Resolve a header index. Fuzzy is opt-in and must not run per dump row."""
     for key in keys:
         nk = norm_key(key)
         if nk in header_norm:
             return header_norm[nk]
-    # fuzzy fallback for slightly mistyped dump headers
+    if not fuzzy:
+        return None
     for key in keys:
-        match, score, _reason = closest_name(key, header_norm.keys(), cutoff=0.9)
+        match, score, _reason = closest_name(key, header_norm.keys(), cutoff=0.92)
         if match is not None:
             return header_norm[match]
     return None
 
 
-def cell_from_row(headers, header_norm, row) -> RowContext:
+def identity_indexes(header_norm: dict, fuzzy: bool = False) -> dict:
+    """Look up site/cell/band/group columns once per sheet."""
+    group_idxs = []
+    for gkey in GROUP_HEADER_KEYS:
+        idx = header_index_from_norm(header_norm, [gkey], fuzzy=False)
+        if idx is not None:
+            group_idxs.append((gkey, idx))
+    return {
+        "site": header_index_from_norm(header_norm, SITE_HEADER_KEYS, fuzzy=fuzzy),
+        "cell_id": header_index_from_norm(header_norm, CELL_ID_HEADER_KEYS, fuzzy=fuzzy),
+        "cell_name": header_index_from_norm(header_norm, CELL_NAME_HEADER_KEYS, fuzzy=False),
+        "band": header_index_from_norm(header_norm, BAND_HEADER_KEYS, fuzzy=False),
+        "groups": group_idxs,
+    }
+
+
+def cell_from_row(headers, header_norm, row, indexes=None) -> RowContext:
     def value_at(idx):
         if idx is None or row is None or idx >= len(row):
             return ""
         return clean_text(row[idx])
 
-    site = value_at(header_index_from_norm(header_norm, SITE_HEADER_KEYS))
-    cell_id = value_at(header_index_from_norm(header_norm, CELL_ID_HEADER_KEYS))
-    cell_name = value_at(header_index_from_norm(header_norm, CELL_NAME_HEADER_KEYS))
-    band_raw = value_at(header_index_from_norm(header_norm, BAND_HEADER_KEYS))
+    indexes = indexes or identity_indexes(header_norm, fuzzy=False)
+    site = value_at(indexes.get("site"))
+    cell_id = value_at(indexes.get("cell_id"))
+    cell_name = value_at(indexes.get("cell_name"))
+    band_raw = value_at(indexes.get("band"))
     groups = {}
-    for gkey in GROUP_HEADER_KEYS:
-        idx = header_index_from_norm(header_norm, [gkey])
-        if idx is None:
-            continue
+    for gkey, idx in indexes.get("groups") or []:
         raw = value_at(idx)
         if raw:
             groups.setdefault(gkey, set()).add(raw)
     family = family_for_band(band_raw) if band_raw else None
-    ctx = RowContext(
+    return RowContext(
         site=site,
         cell_id=cell_id,
         cell_name=cell_name,
@@ -515,7 +531,6 @@ def cell_from_row(headers, header_norm, row) -> RowContext:
         band_tokens=tokens_for_family(family, band_raw),
         groups=groups,
     )
-    return ctx
 
 
 def is_new_style_ref_headers(header_row) -> bool:

@@ -28,6 +28,7 @@ if str(SCRIPT_DIR) not in sys.path:
 
 import compare_reference_parameters as audit  # noqa: E402
 import license_control as license_mod  # noqa: E402
+from app_version import APP_TITLE, APP_VERSION  # noqa: E402
 
 
 def open_path(path: Path):
@@ -86,7 +87,7 @@ def launch_gui():
 
     defaults = ensure_default_folders()
     root = tk.Tk()
-    root.title("Parameter Inconsistency Audit")
+    root.title(APP_TITLE)
     root.geometry("980x720")
     root.minsize(820, 560)
 
@@ -378,7 +379,7 @@ def launch_gui():
     header.pack(fill=tk.X)
     tk.Label(
         header,
-        text="Parameter Inconsistency Audit",
+        text=APP_TITLE,
         fg="white",
         bg="#1F4E79",
         font=("Segoe UI", 16, "bold"),
