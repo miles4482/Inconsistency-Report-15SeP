@@ -4,6 +4,23 @@ Parameter Inconsistency Audit — Windows folder app
 This package is a FOLDER (not a single packed exe). Extract it, then run
 ParameterAudit.exe inside the extracted folder.
 
+License (required) — easy load
+------------------------------
+You do NOT have to rename the file. Put any of these next to ParameterAudit.exe:
+  ParameterAudit.lic
+  ParameterAudit.json
+  ParameterAudit.txt
+  Owner_ParameterAudit_7day.txt  (or any .lic / .json / .txt license)
+
+Or click **Load license file…** and pick the downloaded file.
+
+To CREATE a license (owner):
+  1. Open LicenseGenerator\LicenseGenerator.exe
+  2. Type Days of license (for example 7)
+  3. Click Generate license
+  4. Copy the generated ParameterAudit.lic / .json / .txt next to ParameterAudit.exe
+
+
 Three folders (created next to the .exe)
 ----------------------------------------
   Input\       configuration dumps used for comparing
@@ -23,10 +40,12 @@ How to run
      - Any file names; 2, 3, 4, 5… files are all treated as reference
      - Different sheet names and many columns are OK
      - Every file is analyzed
-4. Double-click ParameterAudit.exe
-5. Confirm the three folders (or Browse this PC to other folders)
-6. Click Generate Report
-7. Reports are written to the Output folder (and opened if you choose)
+4. Put a license file next to ParameterAudit.exe (.lic or .json or .txt). No rename required.
+   Or click Load license file… and pick the file.
+5. Double-click ParameterAudit.exe
+6. Confirm the three folders (or Browse this PC to other folders)
+7. Click Generate Report
+8. Reports are written to the Output folder (and opened if you choose)
 
 You can also Browse this PC and point the app at folders that already exist
 somewhere else. Files stay on this PC. Nothing is uploaded. There is no

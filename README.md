@@ -10,6 +10,24 @@ One tool, three local folders on your PC:
 
 Files stay on this PC. There is no upload and no file-size limit from the app.
 
+## License (required)
+
+The app will not run without an active signed license. Default validity is **7 days**.
+
+You can drop **`.lic`, `.json`, or `.txt`** next to `ParameterAudit.exe` — no rename needed — or click **Load license file…**.
+
+### Owner: generate a license on Windows
+
+1. Open `LicenseGenerator.exe`.
+2. Type **Days of license** (example: `7`).
+3. Click **Generate license**.
+4. Copy the generated `ParameterAudit.lic` (also saved as `.json` and `.txt`) next to `ParameterAudit.exe`.
+
+```bash
+python3 scripts/issue_license.py --to "Site A" --days 7 -o SiteA.lic
+python3 scripts/license_generator_app.py
+```
+
 ## Windows app
 
 Download [`packages/ParameterAudit_Windows.rar`](packages/ParameterAudit_Windows.rar), extract the folder, then run `ParameterAudit.exe`.

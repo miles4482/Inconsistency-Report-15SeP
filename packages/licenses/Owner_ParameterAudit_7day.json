@@ -1,0 +1,10 @@
+{
+  "v": 1,
+  "product": "ParameterAudit",
+  "license_id": "dab47e18-1302-4700-8c88-92036523f1b4",
+  "issued_to": "Owner",
+  "issued_at": "2026-09-15T16:37:23+00:00",
+  "expires_at": "2026-09-22T16:37:23+00:00",
+  "default_period_days": 7,
+  "signature": "6daf1b0370ff213ef1e0a63c29f61842a875abe5ec90ff9ad9ca0f3e07d5b98eac761be68598e0bf575142c82830b9297877abd64d684cd52eb2fb1fde1cab02"
+}

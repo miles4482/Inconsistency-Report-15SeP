@@ -1,25 +1,19 @@
 # -*- mode: python ; coding: utf-8 -*-
 from PyInstaller.utils.hooks import collect_submodules
 
-hidden = collect_submodules("openpyxl") + collect_submodules("pyxlsb")
-hidden += ["compare_reference_parameters", "license_control", "tkinter", "tkinter.filedialog", "tkinter.messagebox", "tkinter.ttk"]
-hidden += collect_submodules("cryptography")
+hidden = collect_submodules("cryptography")
+hidden += ["license_control", "tkinter", "tkinter.messagebox"]
 
 a = Analysis(
-    ["scripts/parameter_audit_app.py"],
+    ["scripts/license_generator_app.py"],
     pathex=["scripts"],
     binaries=[],
-    datas=[
-        ("How_to_use.txt", "."),
-        ("app_folders/Input", "Input"),
-        ("app_folders/Reference", "Reference"),
-        ("app_folders/Output", "Output"),
-    ],
+    datas=[],
     hiddenimports=hidden,
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[],
-    excludes=[],
+    excludes=["openpyxl", "pyxlsb"],
     noarchive=False,
 )
 pyz = PYZ(a.pure)
@@ -28,7 +22,7 @@ exe = EXE(
     a.scripts,
     [],
     exclude_binaries=True,
-    name="ParameterAudit",
+    name="LicenseGenerator",
     debug=False,
     bootloader_ignore_signals=False,
     strip=False,
@@ -48,5 +42,5 @@ coll = COLLECT(
     strip=False,
     upx=False,
     upx_exclude=[],
-    name="ParameterAudit",
+    name="LicenseGenerator",
 )
