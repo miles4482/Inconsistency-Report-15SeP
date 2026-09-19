@@ -8,7 +8,7 @@ Three local folders:
 
 Regular use:
     python3 scripts/parameter_audit_app.py
-    python3 scripts/compare_reference_parameters.py --input-folder ... --reference-folder ... --output-folder ...
+    python3 scripts/compare_reference_parameters.py --input-folder ... --reference-folder ... --output-folder ... --rats 4G,5G
     ./run_audit.sh
     run_audit.bat
 """
@@ -33,6 +33,7 @@ from openpyxl.utils import get_column_letter
 from pyxlsb import open_workbook
 
 import license_control as license_mod
+import smart_match as smart
 
 
 WORKBOOK_SUFFIXES = {".xlsx", ".xlsb", ".xlsm"}
@@ -114,20 +115,27 @@ REF_HEADER_ALIASES = {
     "pid": {
         "PARAMETERID",
         "PARAMETER",
-        "PARAMETERNAME",
         "PARAMID",
         "PARA",
-        "PARANAME",
         "ATTR",
         "ATTRIBUTE",
-        "ATTRIBUTENAME",
         "PARAM",
+    },
+    "param_name": {
+        "PARAMETERNAME",
+        "PARAMNAME",
+        "PARANAME",
+        "DISPLAYNAME",
+        "FULLNAME",
+        "ATTRIBUTENAME",
     },
     "recommend": {
         "RECOMMENDVALUE",
         "RECOMMENDEDVALUE",
         "RECOMMEND",
         "RECOMMENDED",
+        "PROPOSEDVALUE",
+        "PROPOSED",
         "PLANVALUE",
         "PLANNEDVALUE",
         "TARGETVALUE",
@@ -164,6 +172,7 @@ class RunContext:
     reference_folder: Path | None = None
     input_files: list = field(default_factory=list)
     reference_files: list = field(default_factory=list)
+    selected_rats: list = field(default_factory=lambda: list(smart.RAT_FOLDERS))
 
 
 def workbook_kind(path: Path) -> str:
@@ -179,15 +188,59 @@ def is_workbook(path: Path) -> bool:
     return path.is_file() and path.suffix.lower() in WORKBOOK_SUFFIXES
 
 
-def list_workbooks(folder: Path | None) -> list[Path]:
+def ensure_rat_input_folders(folder: Path | None):
+    if folder is None:
+        return
+    folder = Path(folder).expanduser()
+    folder.mkdir(parents=True, exist_ok=True)
+    for rat in smart.RAT_FOLDERS:
+        (folder / rat).mkdir(parents=True, exist_ok=True)
+
+
+def list_workbooks(folder: Path | None, rats=None, use_rat_subfolders: bool = False) -> list[Path]:
     if folder is None:
         return []
     folder = Path(folder).expanduser()
     if not folder.exists() or not folder.is_dir():
         return []
-    files = [p for p in folder.iterdir() if is_workbook(p)]
-    files.sort(key=lambda p: p.name.lower())
+    if not use_rat_subfolders:
+        files = [p for p in folder.iterdir() if is_workbook(p)]
+        files.sort(key=lambda p: p.name.lower())
+        return files
+    selected = smart.normalize_rats(rats)
+    files = []
+    seen = set()
+    for rat in selected:
+        for name in smart.rat_subfolder_names(rat):
+            sub = folder / name
+            if not sub.is_dir():
+                continue
+            for path in sub.iterdir():
+                key = path.resolve() if path.exists() else path
+                if is_workbook(path) and key not in seen:
+                    files.append(path)
+                    seen.add(key)
+    if set(selected) == set(smart.RAT_FOLDERS):
+        for path in folder.iterdir():
+            key = path.resolve() if path.exists() else path
+            if is_workbook(path) and key not in seen:
+                files.append(path)
+                seen.add(key)
+    files.sort(key=lambda p: (p.parent.name.lower(), p.name.lower()))
     return files
+
+
+def workbook_rel_label(path: Path, folder: Path | None) -> str:
+    path = Path(path)
+    if folder:
+        try:
+            rel = path.relative_to(Path(folder).expanduser().resolve())
+            return str(rel).replace("\\", "/")
+        except ValueError:
+            pass
+    if path.parent.name in smart.RAT_FOLDERS:
+        return f"{path.parent.name}/{path.name}"
+    return path.name
 
 
 def sheet_names(path: Path) -> list[str]:
@@ -332,6 +385,7 @@ def build_run_context(
     reference_folder: Path | None = None,
     input_files: list | None = None,
     reference_files: list | None = None,
+    selected_rats: list | None = None,
 ) -> RunContext:
     now = datetime.now()
     run_id = run_id or now.strftime("%Y%m%d_%H%M%S")
@@ -359,6 +413,7 @@ def build_run_context(
         reference_folder=Path(reference_folder) if reference_folder else None,
         input_files=input_files,
         reference_files=reference_files,
+        selected_rats=list(selected_rats or smart.RAT_FOLDERS),
     )
 
 
@@ -587,6 +642,7 @@ def find_attr_record(mapping, moc_name, attr_name):
 def resolve_parameter(param, mapping):
     mml = clean_text(param["mml"])
     pid = clean_text(param["pid"])
+    pname = clean_text(param.get("param_name"))
     result = {
         "sheet": None,
         "column": None,
@@ -594,51 +650,82 @@ def resolve_parameter(param, mapping):
         "bit": None,
         "moc": None,
         "reason": "",
+        "smart_note": "",
     }
     if not mml or not pid:
         result["reason"] = "Missing MML Object or Parameter ID"
         return result
 
+    notes = []
+    moc_names = []
+    for recs in mapping["attrs_by_moc"].values():
+        for rec in recs.values():
+            moc_names.append(rec["moc"])
+            moc_names.append(rec["sheet"])
+    moc_names.extend(mapping["moc_to_sheet"].values())
+    matched_mo, score, why = smart.closest_name(mml, moc_names, cutoff=0.8)
+    if matched_mo and smart.norm_key(matched_mo) != smart.norm_key(mml):
+        notes.append(f"Interpreted MO '{mml}' as '{matched_mo}' ({why})")
+        mml = matched_mo
+
     moc_key = norm_key(mml)
-    sheet = mapping["moc_to_sheet"].get(moc_key)
     moc_attrs = mapping["attrs_by_moc"].get(moc_key, {})
     mml_as_attr_hits = mapping["attrs_global"].get(moc_key, [])
 
-    left, right = (pid.split("@", 1) + [None])[:2] if "@" in pid else (pid, None)
-    left, right = clean_text(left), clean_text(right) if right else None
+    attr_name, bit_name = smart.split_parameter_id(pid)
+    if "@" not in pid:
+        attr_name, bit_name = pid, None
 
-    def choose_roles():
-        if not right:
-            if moc_attrs and norm_key(left) in moc_attrs:
-                return left, None
-            if mml_as_attr_hits and not moc_attrs:
-                return mml, left
-            return left, None
-        left_is_attr = bool(moc_attrs and norm_key(left) in moc_attrs) or bool(
-            find_attr_record(mapping, mml, left)
-        )
-        right_is_attr = bool(moc_attrs and norm_key(right) in moc_attrs) or bool(
-            find_attr_record(mapping, mml, right)
-        )
-        if right_is_attr and not left_is_attr:
-            return right, left
-        if left_is_attr and not right_is_attr:
-            return left, right
-        if right_is_attr and left_is_attr:
-            return right, left
-        if mml_as_attr_hits and not moc_attrs:
-            return mml, left if not right_is_attr else right
-        return right, left
+    def attr_names_for_mo():
+        names = []
+        for rec in moc_attrs.values():
+            names.append(rec["attr"])
+            names.append(rec["column"])
+        return names
 
-    attr_name, bit_name = choose_roles()
-    rec = find_attr_record(mapping, mml, attr_name)
+    def locate(attr):
+        if not attr:
+            return None
+        rec = find_attr_record(mapping, mml, attr)
+        if rec:
+            return rec
+        hit, hit_score, hit_why = smart.closest_name(attr, attr_names_for_mo(), cutoff=0.8)
+        if hit:
+            rec = find_attr_record(mapping, mml, hit)
+            if rec:
+                notes.append(f"Interpreted parameter '{attr}' as '{hit}' ({hit_why})")
+            return rec
+        return None
+
+    rec = locate(attr_name)
+    if rec is None and pname:
+        rec = locate(pname)
+        if rec:
+            notes.append(f"Matched dump field using Parameter Name '{pname}'")
+    if rec is None and bit_name:
+        swapped = locate(bit_name)
+        if swapped:
+            rec = swapped
+            attr_name, bit_name = bit_name, attr_name
+            notes.append("Parameter ID sides around @ were swapped to match the dump")
+    if rec is None and "@" not in pid:
+        if moc_attrs and norm_key(pid) in moc_attrs:
+            rec = moc_attrs[norm_key(pid)]
+        elif mml_as_attr_hits and not moc_attrs:
+            rec = mml_as_attr_hits[0]
+            if bit_name is None:
+                bit_name = pid
+            attr_name = rec["attr"]
     if rec is None and mml_as_attr_hits:
         rec = mml_as_attr_hits[0]
         if bit_name is None:
-            bit_name = pid if "@" not in pid else left
+            bit_name = pid if "@" not in pid else smart.split_parameter_id(pid)[1]
         attr_name = rec["attr"]
     if rec is None:
         result["reason"] = f"Attribute not mapped: {mml} / {pid}"
+        if not pname:
+            result["reason"] += ". If this sheet has no Parameter Name, add Parameter Name along with Parameter ID."
+        result["smart_note"] = " | ".join(notes)
         return result
 
     result.update(
@@ -649,12 +736,21 @@ def resolve_parameter(param, mapping):
             "bit": bit_name,
             "moc": rec["moc"],
             "reason": "OK",
+            "smart_note": " | ".join(notes),
         }
     )
     return result
 
 
-def object_label(row, headers):
+def object_label(row, headers, ctx=None):
+    if ctx and ctx.cell_key:
+        extra = []
+        if ctx.band_family or ctx.band_raw:
+            extra.append(ctx.band_family or ctx.band_raw)
+        label = ctx.cell_key
+        if extra:
+            label += f" [{', '.join(extra)}]"
+        return label
     parts = []
     for key in headers[:3]:
         idx = headers.index(key)
@@ -664,19 +760,102 @@ def object_label(row, headers):
     return " | ".join(parts[:2]) if parts else "row"
 
 
-def compare_param(param, resolved, cache):
+class CellBandIndex:
+    """Map eNodeB/gNodeB + cell ID to frequency band and Comm/Ho group IDs."""
+
+    def __init__(self, cache: SheetCache):
+        self.by_key = {}
+        self.groups_by_key = defaultdict(lambda: defaultdict(set))
+        self._build(cache)
+
+    def _sheet_role(self, sheet_name: str) -> str | None:
+        nk = norm_key(sheet_name)
+        if nk == "CELL" or nk in {norm_key(a) for a in smart.SHEET_ALIASES["CELL"]}:
+            return "cell"
+        if nk == "NRDUCELL" or nk in {norm_key(a) for a in smart.SHEET_ALIASES["NRDUCELL"]}:
+            return "nrducell"
+        if "INTERFREQHOGROUP" in nk:
+            return "group"
+        if "INTERRATHOCOMM" in nk:
+            return "group"
+        hit, _score, _why = smart.closest_name(
+            sheet_name,
+            ["Cell", "NRDUCell", "InterFreqHoGroup", "InterRatHoComm"],
+            cutoff=0.9,
+        )
+        if hit:
+            return self._sheet_role(hit)
+        return None
+
+    def _build(self, cache: SheetCache):
+        for sheet_name in cache.names():
+            role = self._sheet_role(sheet_name)
+            if not role:
+                continue
+            payload = cache.get(sheet_name)
+            if not payload:
+                continue
+            for row in payload["rows"]:
+                ctx = smart.cell_from_row(payload["headers"], payload["header_norm"], row)
+                if not ctx.cell_key:
+                    continue
+                if role in {"cell", "nrducell"}:
+                    existing = self.by_key.get(ctx.cell_key)
+                    if existing is None:
+                        self.by_key[ctx.cell_key] = ctx
+                    else:
+                        existing.band_tokens |= ctx.band_tokens
+                        if not existing.band_family:
+                            existing.band_family = ctx.band_family
+                        if not existing.band_raw:
+                            existing.band_raw = ctx.band_raw
+                        if not existing.cell_name:
+                            existing.cell_name = ctx.cell_name
+                if ctx.groups:
+                    for gname, ids in ctx.groups.items():
+                        self.groups_by_key[ctx.cell_key][gname] |= set(ids)
+
+    def enrich(self, ctx: smart.RowContext) -> smart.RowContext:
+        key = ctx.cell_key
+        if not key:
+            return ctx
+        indexed = self.by_key.get(key)
+        if indexed:
+            if not ctx.band_tokens:
+                ctx.band_tokens = set(indexed.band_tokens)
+                ctx.band_family = indexed.band_family
+                ctx.band_raw = indexed.band_raw
+            if not ctx.cell_name:
+                ctx.cell_name = indexed.cell_name
+        for gname, ids in self.groups_by_key.get(key, {}).items():
+            ctx.groups.setdefault(gname, set()).update(ids)
+        return ctx
+
+
+def compare_param(param, resolved, cache, cell_index=None):
     recommend = param["recommend"]
+    spec = smart.parse_recommend(recommend)
     out = {
         "status": "",
         "objects_checked": 0,
         "match_count": 0,
         "mismatch_count": 0,
         "missing_count": 0,
+        "skipped_not_applicable": 0,
         "unique_actuals": [],
         "sample_mismatches": [],
         "remark": resolved.get("reason") or "",
         "actual_source": "",
+        "applied_recommend": "",
     }
+    if resolved.get("smart_note"):
+        out["remark"] = ((out["remark"] + " | ") if out["remark"] and out["remark"] != "OK" else "") + resolved["smart_note"]
+        if resolved.get("reason") == "OK" and not out["remark"]:
+            out["remark"] = resolved["smart_note"]
+    if param.get("no_recommend_reason") and is_empty(recommend):
+        out["status"] = "No Recommend Value"
+        out["remark"] = param["no_recommend_reason"]
+        return out
     if resolved.get("reason") != "OK":
         out["status"] = "Not Found in Configuration"
         return out
@@ -692,13 +871,32 @@ def compare_param(param, resolved, cache):
     if col_idx is None:
         col_idx = sheet["header_norm"].get(norm_key(col))
     if col_idx is None:
+        pname = clean_text(param.get("param_name"))
+        if pname:
+            col_idx = sheet["header_index"].get(pname)
+            if col_idx is None:
+                col_idx = sheet["header_norm"].get(norm_key(pname))
+            if col_idx is None:
+                hit, _score, why = smart.closest_name(
+                    pname, sheet["headers"], cutoff=0.8
+                )
+                if hit:
+                    col_idx = sheet["header_index"].get(hit)
+                    out["remark"] = (
+                        (out["remark"] + " | " if out["remark"] and out["remark"] != "OK" else "")
+                        + f"Interpreted column '{pname}' as '{hit}' ({why})"
+                    )
+    if col_idx is None:
         out["status"] = "Not Found in Configuration"
         out["remark"] = f"Column not present: {col}"
+        if not param.get("param_name"):
+            out["remark"] += ". Add Parameter Name along with Parameter ID if this field is a display name."
         return out
 
     out["actual_source"] = f"{resolved['sheet']} / {sheet['headers'][col_idx]}"
     counts = Counter()
     mismatches = []
+    applied_notes = Counter()
     for row in sheet["rows"]:
         raw = row[col_idx] if col_idx < len(row) else None
         used = raw
@@ -712,36 +910,71 @@ def compare_param(param, resolved, cache):
             else:
                 used = f"<BIT_MISSING:{resolved['bit']}>"
                 bits = parse_bitfield(raw) or {}
-                similar = [name for name in bits if resolved["bit"].replace("NSA_", "NR_") in name or name.endswith(norm_key(resolved["bit"])[-16:])]
+                similar = [
+                    name
+                    for name in bits
+                    if resolved["bit"].replace("NSA_", "NR_") in name
+                    or name.endswith(norm_key(resolved["bit"])[-16:])
+                ]
+                if not similar:
+                    hit, _score, _why = smart.closest_name(resolved["bit"], bits.keys(), cutoff=0.8)
+                    if hit:
+                        similar = [hit]
                 if similar and "closest_bit" not in out:
                     out["closest_bit"] = similar[0]
         display = clean_text(used)
         if display == "":
             display = "<EMPTY>"
+        ctx = smart.cell_from_row(sheet["headers"], sheet["header_norm"], row)
+        if cell_index is not None:
+            ctx = cell_index.enrich(ctx)
+        expected, applied_note = smart.select_recommend(spec, ctx)
+        if spec.has_conditional and expected is None:
+            out["skipped_not_applicable"] += 1
+            continue
+        row_recommend = expected if spec.has_conditional else recommend
+        if spec.has_conditional and applied_note:
+            applied_notes[f"{applied_note}=>{row_recommend}"] += 1
         counts[display] += 1
         out["objects_checked"] += 1
-        if is_empty(recommend):
+        if is_empty(row_recommend):
             continue
         if bit_state == "bit_missing":
             out["missing_count"] += 1
             out["mismatch_count"] += 1
             if len(mismatches) < 8:
-                mismatches.append(object_label(row, sheet["headers"]) + f" -> {display}")
+                mismatches.append(object_label(row, sheet["headers"], ctx) + f" -> {display}")
             continue
-        if values_match(used, recommend):
+        if values_match(used, row_recommend):
             out["match_count"] += 1
         else:
             out["mismatch_count"] += 1
             if len(mismatches) < 8:
-                mismatches.append(object_label(row, sheet["headers"]) + f" -> {display}")
+                mismatches.append(
+                    object_label(row, sheet["headers"], ctx)
+                    + f" expected {clean_text(row_recommend)} -> {display}"
+                )
 
     out["unique_actuals"] = counts.most_common(12)
     out["sample_mismatches"] = mismatches
+    if applied_notes:
+        out["applied_recommend"] = " | ".join(f"{k} ({n})" for k, n in applied_notes.most_common(8))
+    if param.get("no_recommend_reason") and is_empty(recommend):
+        out["status"] = "No Recommend Value"
+        out["remark"] = param["no_recommend_reason"]
+        return out
     if is_empty(recommend):
         out["status"] = "No Recommend Value"
         out["remark"] = "Reference recommend value is empty; parameter not audited for inconsistency"
         return out
     if out["objects_checked"] == 0:
+        if out["skipped_not_applicable"]:
+            out["status"] = "No Recommend Value"
+            out["remark"] = (
+                "No cell matched the band/group conditions in Proposed/Recommended Value "
+                f"({out['skipped_not_applicable']} row(s) not applicable)."
+            )
+            return out
         out["status"] = "Not Found in Configuration"
         out["remark"] = "No data rows in mapped sheet"
         return out
@@ -774,6 +1007,10 @@ def compare_param(param, resolved, cache):
             f"{resolved.get('sheet')} / {resolved.get('column')} for this software version."
             + extra
         )
+    if resolved.get("smart_note") and out["remark"] in {"", "OK"}:
+        out["remark"] = resolved["smart_note"]
+    elif resolved.get("smart_note") and resolved["smart_note"] not in (out["remark"] or ""):
+        out["remark"] = (out["remark"] + " | " if out["remark"] else "") + resolved["smart_note"]
     return out
 
 
@@ -845,6 +1082,21 @@ def load_reference_file(ref_path: Path, ref_count: int = 1):
                 mml = sheet_name
                 sheet_as_mo = True
             rec = cell("recommend")
+            pname = clean_text(cell("param_name"))
+            new_style = smart.is_new_style_ref_headers(rows[header_idx])
+            missing_name_col = "param_name" not in header_map
+            no_recommend_reason = None
+            if missing_name_col and new_style:
+                rec = None
+                no_recommend_reason = (
+                    "No Parameter Name column on this sheet. "
+                    "Add Parameter Name along with Parameter ID."
+                )
+            elif "param_name" in header_map and is_empty(pname) and new_style:
+                rec = None
+                no_recommend_reason = (
+                    "Parameter Name is empty. Add Parameter Name along with Parameter ID."
+                )
             sheet_key = sheet_name if ref_count <= 1 else f"{ref_path.name} | {sheet_name}"
             params.append(
                 {
@@ -856,7 +1108,9 @@ def load_reference_file(ref_path: Path, ref_count: int = 1):
                     "function": clean_text(cell("function")) or "Unspecified",
                     "mml": mml,
                     "pid": pid,
+                    "param_name": pname or None,
                     "recommend": rec if not is_empty(rec) else None,
+                    "no_recommend_reason": no_recommend_reason,
                     "network": guess_network_label(ref_path.name, sheet_name),
                     "sheet_is_mo": sheet_as_mo,
                 }
@@ -899,9 +1153,12 @@ def resolve_by_sheet_name(param, workbook_names, cache):
         "bit": None,
         "moc": None,
         "reason": "",
+        "smart_note": "",
     }
     mml = clean_text(param.get("mml"))
     pid = clean_text(param.get("pid"))
+    pname = clean_text(param.get("param_name"))
+    notes = []
     if not pid:
         result["reason"] = "Missing Parameter ID"
         return result
@@ -912,47 +1169,71 @@ def resolve_by_sheet_name(param, workbook_names, cache):
             if key.endswith(norm_key(mml)) or norm_key(mml).endswith(key):
                 if min(len(key), len(norm_key(mml))) >= 6:
                     sheet = actual
+                    notes.append(f"Interpreted MO '{mml}' as sheet '{actual}'")
                     break
+    if sheet is None and mml:
+        hit, _score, why = smart.closest_name(mml, name_index.values(), cutoff=0.8)
+        if hit:
+            sheet = hit
+            notes.append(f"Interpreted MO '{mml}' as sheet '{hit}' ({why})")
     if sheet is None:
         result["reason"] = f"No input sheet named as MO '{mml}'"
+        result["smart_note"] = " | ".join(notes)
         return result
     payload = cache.get(sheet)
     if not payload:
         result["reason"] = f"Sheet not present: {sheet}"
         return result
-    left, right = (pid.split("@", 1) + [None])[:2] if "@" in pid else (pid, None)
-    left, right = clean_text(left), clean_text(right) if right else None
-    candidates = [c for c in (left, right, pid) if c]
+    attr_name, bit_name = smart.split_parameter_id(pid)
+    candidates = [c for c in (pname, attr_name, bit_name, pid) if c]
     col_idx = None
     col_name = None
-    bit_name = None
+    chosen = None
     for cand in candidates:
         idx = find_column_index(payload, cand)
         if idx is not None:
             col_idx = idx
             col_name = payload["headers"][idx]
-            bit_name = next((c for c in candidates if norm_key(c) != norm_key(cand)), None)
+            chosen = cand
             break
-    if col_idx is None and right:
-        idx = find_column_index(payload, right)
-        if idx is not None:
-            col_idx = idx
-            col_name = payload["headers"][idx]
-            bit_name = left
+    if col_idx is None:
+        for cand in candidates:
+            hit, _score, why = smart.closest_name(cand, payload["headers"], cutoff=0.8)
+            if hit:
+                col_idx = find_column_index(payload, hit)
+                col_name = hit
+                chosen = cand
+                notes.append(f"Interpreted column '{cand}' as '{hit}' ({why})")
+                break
     if col_idx is None:
         result["reason"] = f"Column not present on sheet {sheet}: {pid}"
+        if not pname:
+            result["reason"] += ". Add Parameter Name along with Parameter ID."
         result["sheet"] = sheet
+        result["smart_note"] = " | ".join(notes)
         return result
+    if bit_name is None and attr_name and chosen and smart.norm_key(chosen) == smart.norm_key(attr_name):
+        bit_name = None
+    if "@" in pid and chosen and smart.norm_key(chosen) == smart.norm_key(attr_name or ""):
+        pass
+    elif "@" in pid and chosen and smart.norm_key(chosen) == smart.norm_key(bit_name or ""):
+        attr_name, bit_name = bit_name, attr_name
     result.update(
         {
             "sheet": sheet,
             "column": col_name,
             "attr": col_name,
-            "bit": bit_name,
+            "bit": bit_name if chosen and smart.norm_key(chosen) != smart.norm_key(bit_name or "") else (
+                bit_name if "@" in pid else None
+            ),
             "moc": mml or sheet,
             "reason": "OK",
+            "smart_note": " | ".join(notes),
         }
     )
+    if "@" in pid:
+        _attr, switch_name = smart.split_parameter_id(pid)
+        result["bit"] = switch_name
     return result
 
 
@@ -961,6 +1242,7 @@ class InputWorkbook:
         self.path = Path(path)
         self.cache = SheetCache(self.path)
         self.mapping = None
+        self._cell_index = None
         names = self.cache.names()
         if any(norm_key(n) == "MAPPINGDEF" for n in names):
             mapping_name = next(n for n in names if norm_key(n) == "MAPPINGDEF")
@@ -972,14 +1254,28 @@ class InputWorkbook:
                 except Exception:
                     self.mapping = None
 
+    def cell_index(self) -> CellBandIndex:
+        if self._cell_index is None:
+            self._cell_index = CellBandIndex(self.cache)
+        return self._cell_index
+
     def resolve(self, param) -> dict:
         moc_key = norm_key(param.get("mml"))
-        if self.mapping and moc_key:
+        if self.mapping:
             mo_known = (
                 moc_key in self.mapping["moc_to_sheet"]
                 or moc_key in self.mapping["attrs_by_moc"]
                 or moc_key in self.mapping["attrs_global"]
             )
+            if not mo_known and param.get("mml"):
+                moc_names = list(self.mapping["moc_to_sheet"].values())
+                for recs in self.mapping["attrs_by_moc"].values():
+                    for rec in recs.values():
+                        moc_names.append(rec["moc"])
+                        moc_names.append(rec["sheet"])
+                hit, _score, _why = smart.closest_name(param.get("mml"), moc_names, cutoff=0.8)
+                if hit:
+                    mo_known = True
             if mo_known:
                 resolved = resolve_parameter(param, self.mapping)
                 if resolved.get("reason") == "OK":
@@ -992,6 +1288,31 @@ class InputStore:
         self.workbooks = [InputWorkbook(path) for path in files]
 
     def compare_param(self, param):
+        if param.get("no_recommend_reason") and is_empty(param.get("recommend")):
+            resolved = {
+                "sheet": None,
+                "column": None,
+                "attr": None,
+                "bit": None,
+                "moc": None,
+                "reason": param["no_recommend_reason"],
+                "smart_note": "",
+            }
+            empty = {
+                "status": "No Recommend Value",
+                "objects_checked": 0,
+                "match_count": 0,
+                "mismatch_count": 0,
+                "missing_count": 0,
+                "skipped_not_applicable": 0,
+                "unique_actuals": [],
+                "sample_mismatches": [],
+                "remark": param["no_recommend_reason"],
+                "actual_source": "",
+                "input_files": "",
+                "applied_recommend": "",
+            }
+            return resolved, empty
         hits = []
         last_resolved = {
             "sheet": None,
@@ -1000,13 +1321,14 @@ class InputStore:
             "bit": None,
             "moc": None,
             "reason": "Not found in any input file",
+            "smart_note": "",
         }
         for wb in self.workbooks:
             resolved = wb.resolve(param)
             if resolved.get("reason") != "OK":
                 last_resolved = resolved
                 continue
-            result = compare_param(param, resolved, wb.cache)
+            result = compare_param(param, resolved, wb.cache, cell_index=wb.cell_index())
             if result["status"] == "Not Found in Configuration" and result["objects_checked"] == 0:
                 last_resolved = resolved
                 last_resolved["reason"] = result.get("remark") or resolved.get("reason")
@@ -1021,11 +1343,13 @@ class InputStore:
                 "match_count": 0,
                 "mismatch_count": 0,
                 "missing_count": 0,
+                "skipped_not_applicable": 0,
                 "unique_actuals": [],
                 "sample_mismatches": [],
                 "remark": last_resolved.get("reason") or "Not found in any input file",
                 "actual_source": "",
                 "input_files": "",
+                "applied_recommend": "",
             }
             return last_resolved, empty
         return merge_file_hits(param, hits)
@@ -1039,20 +1363,24 @@ def merge_file_hits(param, hits):
         "match_count": 0,
         "mismatch_count": 0,
         "missing_count": 0,
+        "skipped_not_applicable": 0,
         "unique_actuals": [],
         "sample_mismatches": [],
         "remark": "",
         "actual_source": "",
+        "applied_recommend": "",
         "input_files": ", ".join(path.name for path, _, _ in hits),
     }
     counts = Counter()
     remarks = []
     sources = []
+    applied = []
     for path, resolved, result in hits:
         merged["objects_checked"] += result["objects_checked"]
         merged["match_count"] += result["match_count"]
         merged["mismatch_count"] += result["mismatch_count"]
         merged["missing_count"] += result.get("missing_count") or 0
+        merged["skipped_not_applicable"] += result.get("skipped_not_applicable") or 0
         for value, count in result.get("unique_actuals") or []:
             counts[f"{path.name}: {value}"] += count
         for sample in result.get("sample_mismatches") or []:
@@ -1062,12 +1390,19 @@ def merge_file_hits(param, hits):
             remarks.append(f"{path.name}: {result['remark']}")
         if result.get("actual_source"):
             sources.append(f"{path.name}: {result['actual_source']}")
+        if result.get("applied_recommend"):
+            applied.append(f"{path.name}: {result['applied_recommend']}")
         if result.get("closest_bit") and "closest_bit" not in merged:
             merged["closest_bit"] = result["closest_bit"]
     merged["unique_actuals"] = counts.most_common(12)
     merged["remark"] = " | ".join(remarks)
     merged["actual_source"] = " | ".join(sources)
+    merged["applied_recommend"] = " | ".join(applied)
     recommend = param.get("recommend")
+    if param.get("no_recommend_reason") and is_empty(recommend):
+        merged["status"] = "No Recommend Value"
+        merged["remark"] = param["no_recommend_reason"]
+        return primary_resolved, merged
     if is_empty(recommend):
         merged["status"] = "No Recommend Value"
         merged["remark"] = merged["remark"] or (
@@ -1075,6 +1410,12 @@ def merge_file_hits(param, hits):
         )
         return primary_resolved, merged
     if merged["objects_checked"] == 0:
+        if merged["skipped_not_applicable"]:
+            merged["status"] = "No Recommend Value"
+            merged["remark"] = merged["remark"] or (
+                "No cell matched the band/group conditions in Proposed/Recommended Value."
+            )
+            return primary_resolved, merged
         merged["status"] = "Not Found in Configuration"
         return primary_resolved, merged
     if merged["mismatch_count"] == 0:
@@ -1175,11 +1516,12 @@ def network_for_sheet(params, sheet_key):
 
 def files_banner(run: RunContext) -> str:
     refs = ", ".join(p.name for p in run.reference_files) or run.reference.name
-    inputs = ", ".join(p.name for p in run.input_files)
+    inputs = ", ".join(workbook_rel_label(p, run.input_folder) for p in run.input_files)
     if not inputs:
         names = [p.name for p in (run.cfg_4g, run.cfg_5g) if p]
         inputs = ", ".join(names)
-    return f"Reference: {refs} | Input: {inputs} | Run {run.run_id}"
+    rats = ", ".join(run.selected_rats or smart.RAT_FOLDERS)
+    return f"Reference: {refs} | Input: {inputs} | Networks: {rats} | Run {run.run_id}"
 
 
 def fill_header(ws, titles, fill, font):
@@ -1295,7 +1637,8 @@ def write_excel(params, summary, func_summary, run: RunContext):
     ws.cell(
         note_row + 1,
         1,
-        "Every workbook in the Input Folder is compared against every workbook in the Reference Folder. "
+        "Every workbook in the selected Input network folders (5G/4G/3G/2G) is compared against every workbook in the Reference Folder. "
+        "Band-specific Proposed/Recommended values (L09/L18/L21/L26) are applied using Cell (4G) and NRDUCell (5G). "
         "Auditable parameters = parameters that have a Recommend Value and were found in configuration. "
         "Inconsistent (total) = Full Inconsistent + Mixed/Partial. "
         "Full Inconsistent = every object differs from recommend. "
@@ -1415,7 +1758,9 @@ def write_excel(params, summary, func_summary, run: RunContext):
         "Function",
         "MML Object",
         "Parameter ID",
+        "Parameter Name",
         "Recommend Value",
+        "Applied Recommend (band/group)",
         "Status",
         "Input File(s)",
         "Config Sheet",
@@ -1453,7 +1798,9 @@ def write_excel(params, summary, func_summary, run: RunContext):
             p["function"],
             p["mml"],
             p["pid"],
+            p.get("param_name") or "",
             "" if p["recommend"] is None else p["recommend"],
+            res.get("applied_recommend") or "",
             res["status"],
             res.get("input_files") or "",
             resolved.get("sheet") or "",
@@ -1471,15 +1818,17 @@ def write_excel(params, summary, func_summary, run: RunContext):
             cell = ws2.cell(r, col, val)
             cell.border = thin
             cell.alignment = Alignment(wrap_text=True, vertical="top")
-            if col == 8:
+            if col == 10:
                 cell.fill = status_fill(res["status"])
         r += 1
     ws2.freeze_panes = "A4"
-    ws2.auto_filter.ref = f"A3:S{max(r-1, 3)}"
+    ws2.auto_filter.ref = f"A3:U{max(r-1, 3)}"
     autosize(ws2, 36)
     ws2.column_dimensions["F"].width = 42
-    ws2.column_dimensions["Q"].width = 50
-    ws2.column_dimensions["R"].width = 45
+    ws2.column_dimensions["G"].width = 36
+    ws2.column_dimensions["I"].width = 36
+    ws2.column_dimensions["S"].width = 50
+    ws2.column_dimensions["T"].width = 45
 
     # 3. Sheet wise
     ws3 = wb.create_sheet("3_Sheet_Wise_Report")
@@ -1874,7 +2223,9 @@ def write_parameter_csv(params, run: RunContext):
         "function",
         "mml_object",
         "parameter_id",
+        "parameter_name",
         "recommend_value",
+        "applied_recommend",
         "status",
         "input_files",
         "config_sheet",
@@ -1901,7 +2252,9 @@ def write_parameter_csv(params, run: RunContext):
                     "function": p["function"],
                     "mml_object": p["mml"],
                     "parameter_id": p["pid"],
+                    "parameter_name": p.get("param_name") or "",
                     "recommend_value": "" if p["recommend"] is None else p["recommend"],
+                    "applied_recommend": res.get("applied_recommend") or "",
                     "status": res["status"],
                     "input_files": res.get("input_files") or "",
                     "config_sheet": resolved.get("sheet") or "",
@@ -1932,6 +2285,7 @@ def write_run_summary(summary, run: RunContext, param_count: int):
         "output_folder": str(run.output_dir),
         "reference_files": [str(p) for p in run.reference_files],
         "input_files": [str(p) for p in run.input_files],
+        "selected_rats": list(run.selected_rats),
         "parameter_count": param_count,
         "overall": dict(summary["ALL"]),
         "sheets": {key: dict(counter) for key, counter in summary.items() if key != "ALL"},
@@ -2011,6 +2365,11 @@ def parse_args(argv=None):
     parser.add_argument("--config-4g", type=Path, help="Single 4G dump (legacy)")
     parser.add_argument("--config-5g", type=Path, help="Single 5G dump (legacy)")
     parser.add_argument("--run-id", help="Optional run id; default is timestamp YYYYMMDD_HHMMSS")
+    parser.add_argument(
+        "--rats",
+        default="5G,4G,3G,2G",
+        help="Which Input subfolders to search: 5G,4G,3G,2G (comma-separated). Default: all.",
+    )
     parser.add_argument("--license", type=Path, help="ParameterAudit.lic file (default: next to the app)")
     parser.add_argument("--license-status", action="store_true", help="Print license status and exit")
     parser.add_argument("--list-inputs", action="store_true", help="Show detected input files and exit")
@@ -2041,19 +2400,27 @@ def execute_folder_audit(
     run_id=None,
     progress=print,
     license_file=None,
+    rats=None,
 ):
     license_info = license_mod.require_active_license(license_file)
     progress(f"License: {license_info.message}")
+    selected_rats = smart.normalize_rats(rats)
+    if not selected_rats:
+        raise ValueError("Select at least one network: 5G, 4G, 3G, or 2G.")
+    if input_folder:
+        ensure_rat_input_folders(input_folder)
     input_files = [Path(p).expanduser().resolve() for p in (input_files or [])]
     reference_files = [Path(p).expanduser().resolve() for p in (reference_files or [])]
     if not input_files:
-        input_files = list_workbooks(input_folder)
+        input_files = list_workbooks(input_folder, rats=selected_rats, use_rat_subfolders=True)
     if not reference_files:
         reference_files = list_workbooks(reference_folder)
     if not input_files:
+        searched = ", ".join(f"{input_folder}/{rat}" if input_folder else rat for rat in selected_rats)
         raise FileNotFoundError(
-            "Input Folder has no Excel workbooks (.xlsx / .xlsb / .xlsm). "
-            "Put 4G dump, 5G dump, 2G dump, or any other configuration files there."
+            "No configuration dumps found in the selected network folders "
+            f"({', '.join(selected_rats)}). Put 5G dumps in Input/5G, 4G dumps in Input/4G, "
+            f"3G in Input/3G, 2G in Input/2G. Searched: {searched}."
         )
     if not reference_files:
         raise FileNotFoundError(
@@ -2074,14 +2441,16 @@ def execute_folder_audit(
         reference_folder=reference_folder,
         input_files=input_files,
         reference_files=reference_files,
+        selected_rats=selected_rats,
     )
     progress(f"Run ID: {run.run_id}")
+    progress(f"Networks: {', '.join(selected_rats)}")
     progress(f"Reference Folder: {run.reference_folder or '(files)'}")
     for path in reference_files:
         progress(f"  REF  {path.name}")
     progress(f"Input Folder: {run.input_folder or '(files)'}")
     for path in input_files:
-        progress(f"  IN   {path.name}")
+        progress(f"  IN   {workbook_rel_label(path, input_folder)}")
     progress(f"Output Folder: {run.output_dir}")
     progress("Loading reference parameters from every reference workbook...")
     params, missing_ref_sheets = load_all_references(reference_files)
@@ -2089,17 +2458,18 @@ def execute_folder_audit(
         progress(
             "  No parameter rows detected in: "
             + ", ".join(missing_ref_sheets)
-            + " (need Parameter ID + Recommend Value or MML Object columns)"
+            + " (need Parameter ID + Recommend/Proposed Value or MML Object columns)"
         )
     progress(f"  {len(params)} parameters from {len(reference_files)} reference file(s)")
     if not params:
         raise ValueError(
             "No reference parameters found. Each reference sheet needs headers such as "
-            "Function / MML Object / Parameter ID / Recommend Value (names can vary)."
+            "Function / MML Object / Parameter ID / Recommend Value, or MO Name / Parameter ID / "
+            "Parameter Name / Proposed Value."
         )
-    progress("Indexing every input workbook (MAPPING DEF and/or sheet name as MO)...")
+    progress("Indexing every input workbook (Cell / NRDUCell bands, MAPPING DEF, sheet name as MO)...")
     store = InputStore(input_files)
-    progress("Resolving and comparing each reference parameter against all input files...")
+    progress("Resolving and comparing each reference parameter against selected input files...")
     for i, param in enumerate(params, start=1):
         resolved, result = store.compare_param(param)
         param["resolved"] = resolved
@@ -2158,8 +2528,9 @@ def main(argv=None):
 
     if args.list_inputs:
         print("Input Folder:", input_folder)
-        for path in list_workbooks(input_folder):
-            print(f"  IN   {path}")
+        print("Networks:", args.rats)
+        for path in list_workbooks(input_folder, rats=args.rats, use_rat_subfolders=True):
+            print(f"  IN   {workbook_rel_label(path, input_folder)}")
         print("Reference Folder:", reference_folder)
         for path in list_workbooks(reference_folder):
             print(f"  REF  {path}")
@@ -2178,7 +2549,7 @@ def main(argv=None):
         print(f"Legacy 5G config: {discovered['cfg_5g']}")
         return 0
 
-    folder_inputs = list_workbooks(input_folder)
+    folder_inputs = list_workbooks(input_folder, rats=args.rats, use_rat_subfolders=True)
     folder_refs = list_workbooks(reference_folder)
     use_folders = bool(args.input_folder or args.reference_folder or (folder_inputs and folder_refs))
 
@@ -2190,6 +2561,7 @@ def main(argv=None):
                 reference_folder=reference_folder,
                 run_id=args.run_id,
                 license_file=args.license,
+                rats=args.rats,
             )
         else:
             extra_inputs = []
@@ -2222,6 +2594,7 @@ def main(argv=None):
                 reference_files=extra_refs,
                 run_id=args.run_id,
                 license_file=args.license,
+                rats=args.rats,
             )
     except (FileNotFoundError, ValueError, license_mod.LicenseError) as exc:
         print(exc, file=sys.stderr)

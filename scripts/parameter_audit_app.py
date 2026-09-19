@@ -62,6 +62,7 @@ def ensure_default_folders() -> dict[str, Path]:
     else:
         for path in folders.values():
             path.mkdir(parents=True, exist_ok=True)
+    audit.ensure_rat_input_folders(folders["input"])
     return folders
 
 
@@ -86,8 +87,8 @@ def launch_gui():
     defaults = ensure_default_folders()
     root = tk.Tk()
     root.title("Parameter Inconsistency Audit")
-    root.geometry("920x820")
-    root.minsize(820, 700)
+    root.geometry("960x920")
+    root.minsize(860, 760)
 
     input_var = tk.StringVar(value=str(defaults["input"]))
     reference_var = tk.StringVar(value=str(defaults["reference"]))
@@ -97,7 +98,7 @@ def launch_gui():
     days_var = tk.StringVar(value=str(license_mod.DEFAULT_LICENSE_DAYS))
     until_var = tk.StringVar(value="")
     status_var = tk.StringVar(
-        value="Select Input Folder, Reference Folder, and Output Folder on this PC. Files are not uploaded."
+        value="Select Input Folder (with 5G/4G/3G/2G), Reference Folder, and Output Folder. Files are not uploaded."
     )
     last_report = {"path": None}
     license_state = {"info": license_mod.license_status(), "path": None}
@@ -207,28 +208,43 @@ def launch_gui():
         except Exception as exc:
             messagebox.showerror("Could not extend license", str(exc)[:1500])
 
-    def folder_listing(folder_text: str) -> list[Path]:
+    rat_vars = {rat: tk.BooleanVar(value=True) for rat in audit.smart.RAT_FOLDERS}
+
+    def selected_rats():
+        return [rat for rat, var in rat_vars.items() if var.get()]
+
+    def folder_listing(folder_text: str, rats=None) -> list:
         folder = Path(folder_text).expanduser()
-        return audit.list_workbooks(folder)
+        if rats is None:
+            return audit.list_workbooks(folder)
+        return audit.list_workbooks(folder, rats=rats, use_rat_subfolders=True)
 
     def refresh_lists():
         input_list.delete(0, tk.END)
         ref_list.delete(0, tk.END)
-        inputs = folder_listing(input_var.get())
+        rats = selected_rats()
+        inputs = folder_listing(input_var.get(), rats=rats)
         refs = folder_listing(reference_var.get())
         if inputs:
             for path in inputs:
-                input_list.insert(tk.END, f"{format_size(path):>10}   {path.name}")
+                label = audit.workbook_rel_label(path, Path(input_var.get()))
+                input_list.insert(tk.END, f"{format_size(path):>10}   {label}")
         else:
-            input_list.insert(tk.END, "(no .xlsx / .xlsb / .xlsm files yet)")
+            if rats:
+                input_list.insert(
+                    tk.END,
+                    "(no dumps in selected folders: " + ", ".join(f"Input/{r}" for r in rats) + ")",
+                )
+            else:
+                input_list.insert(tk.END, "(select 5G / 4G / 3G / 2G to search those Input folders)")
         if refs:
             for path in refs:
                 ref_list.insert(tk.END, f"{format_size(path):>10}   {path.name}")
         else:
             ref_list.insert(tk.END, "(no .xlsx / .xlsb / .xlsm files yet)")
         status_var.set(
-            f"Input: {len(inputs)} file(s)  |  Reference: {len(refs)} file(s)  |  "
-            "Every input file is compared with every reference file."
+            f"Networks: {', '.join(rats) or '(none)'}  |  Input: {len(inputs)} file(s)  |  "
+            f"Reference: {len(refs)} file(s)  |  Only selected Input subfolders are searched."
         )
         return inputs, refs
 
@@ -255,12 +271,20 @@ def launch_gui():
             )
             return
         inputs, refs = refresh_lists()
+        rats = selected_rats()
+        if not rats:
+            messagebox.showerror(
+                "Select a network",
+                "Tick at least one of 5G / 4G / 3G / 2G.\n"
+                "The tool searches only those folders inside Input.",
+            )
+            return
         if len(inputs) < 1:
             messagebox.showerror(
                 "Input Folder empty",
-                "Put at least one configuration dump in the Input Folder.\n"
-                "Names can be anything (4G dump, 5G dump, 2G dump, ...).\n"
-                "Any number of files and sheets is allowed.",
+                "Put dumps in the selected network folders inside Input:\n"
+                "  Input\\5G   Input\\4G   Input\\3G   Input\\2G\n"
+                f"Currently selected: {', '.join(rats)}",
             )
             return
         if len(refs) < 1:
@@ -280,8 +304,9 @@ def launch_gui():
         log_box.insert(
             tk.END,
             "Reading folders from your PC (not uploaded).\n"
+            f"Networks: {', '.join(rats)}\n"
             f"Input Folder ({len(inputs)} files): {input_var.get()}\n"
-            + "".join(f"  - {p.name}\n" for p in inputs)
+            + "".join(f"  - {audit.workbook_rel_label(p, Path(input_var.get()))}\n" for p in inputs)
             + f"Reference Folder ({len(refs)} files): {reference_var.get()}\n"
             + "".join(f"  - {p.name}\n" for p in refs)
             + f"Output Folder: {output_dir}\n\n",
@@ -300,6 +325,7 @@ def launch_gui():
                     reference_folder=Path(reference_var.get()),
                     progress=progress,
                     license_file=current_license_path(),
+                    rats=rats,
                 )
                 messages.put(("done", run, summary))
             except Exception as exc:
@@ -359,7 +385,7 @@ def launch_gui():
     ).pack(anchor="w", padx=16, pady=(12, 0))
     tk.Label(
         header,
-        text="Three folders on THIS PC: Input (dumps) · Reference (plan values) · Output (reports). No upload. No file-count limit.",
+        text="Three folders on THIS PC: Input (5G/4G/3G/2G dumps) · Reference (plan values) · Output (reports). No upload.",
         fg="#D6E3F0",
         bg="#1F4E79",
         font=("Segoe UI", 10),
@@ -428,9 +454,36 @@ def launch_gui():
         body,
         "1. Input Folder  (files used for comparing)",
         input_var,
-        "Select Input Folder — configuration dumps (4G, 5G, 2G, any names)",
-        "Any file names. More than one file. Any number of sheets and columns. "
-        "Sheet names that match an MO / MML Object are treated as that object. Every file is checked.",
+        "Select Input Folder — contains 5G / 4G / 3G / 2G subfolders",
+        "Put dumps inside Input\\5G, Input\\4G, Input\\3G, Input\\2G. Any file names. "
+        "Tick the networks below; only those folders are searched. Sheet names that match an MO are used as that object.",
+    )
+    rat_frame = tk.LabelFrame(body, text="Search these networks (Input subfolders)", padx=8, pady=6)
+    rat_frame.pack(fill=tk.X, pady=(0, 8))
+    tk.Label(
+        rat_frame,
+        text="Select 5G / 4G / 3G / 2G. The tool looks only in those folders for the inconsistency report.",
+        anchor="w",
+        fg="#333",
+    ).pack(fill=tk.X)
+    rat_row = tk.Frame(rat_frame)
+    rat_row.pack(fill=tk.X, pady=(4, 0))
+    rat_colors = {"5G": "#6A1B9A", "4G": "#1565C0", "3G": "#2E7D32", "2G": "#E65100"}
+    for rat in audit.smart.RAT_FOLDERS:
+        btn = tk.Checkbutton(
+            rat_row,
+            text=f"  {rat}  ",
+            variable=rat_vars[rat],
+            command=refresh_lists,
+            indicatoron=True,
+            font=("Segoe UI", 11, "bold"),
+            fg=rat_colors[rat],
+            selectcolor="#E3F2FD",
+            padx=8,
+        )
+        btn.pack(side=tk.LEFT, padx=(0, 12))
+    tk.Label(rat_row, text="Folders: Input\\5G  Input\\4G  Input\\3G  Input\\2G", fg="#555").pack(
+        side=tk.LEFT, padx=8
     )
     ref_btn, ref_list = folder_row(
         body,
