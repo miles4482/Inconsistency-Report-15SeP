@@ -87,8 +87,8 @@ def launch_gui():
     defaults = ensure_default_folders()
     root = tk.Tk()
     root.title("Parameter Inconsistency Audit")
-    root.geometry("960x920")
-    root.minsize(860, 760)
+    root.geometry("980x720")
+    root.minsize(820, 560)
 
     input_var = tk.StringVar(value=str(defaults["input"]))
     reference_var = tk.StringVar(value=str(defaults["reference"]))
@@ -374,7 +374,7 @@ def launch_gui():
         else:
             messagebox.showinfo("No report yet", "Generate a report first.")
 
-    header = tk.Frame(root, bg="#1F4E79", height=88)
+    header = tk.Frame(root, bg="#1F4E79", height=72)
     header.pack(fill=tk.X)
     tk.Label(
         header,
@@ -382,14 +382,14 @@ def launch_gui():
         fg="white",
         bg="#1F4E79",
         font=("Segoe UI", 16, "bold"),
-    ).pack(anchor="w", padx=16, pady=(12, 0))
+    ).pack(anchor="w", padx=16, pady=(10, 0))
     tk.Label(
         header,
         text="Three folders on THIS PC: Input (5G/4G/3G/2G dumps) · Reference (plan values) · Output (reports). No upload.",
         fg="#D6E3F0",
         bg="#1F4E79",
         font=("Segoe UI", 10),
-    ).pack(anchor="w", padx=16, pady=(0, 12))
+    ).pack(anchor="w", padx=16, pady=(0, 10))
 
     lic_frame = tk.Frame(root, bg="#FFEBEE", padx=16, pady=8)
     lic_frame.pack(fill=tk.X)
@@ -410,8 +410,8 @@ def launch_gui():
     tk.Button(lic_frame, text="Refresh", command=refresh_license, width=10).pack(side=tk.RIGHT)
 
     if license_mod.find_private_key_path():
-        admin = tk.LabelFrame(root, text="License Admin (owner — private key detected)", padx=12, pady=8)
-        admin.pack(fill=tk.X, padx=16, pady=(8, 0))
+        admin = tk.LabelFrame(root, text="License Admin (owner — private key detected)", padx=12, pady=6)
+        admin.pack(fill=tk.X, padx=16, pady=(6, 0))
         row = tk.Frame(admin)
         row.pack(fill=tk.X)
         tk.Label(row, text="Issued to:").pack(side=tk.LEFT)
@@ -424,29 +424,53 @@ def launch_gui():
         tk.Button(row, text="Extend current license", command=extend_current_license, width=20).pack(
             side=tk.LEFT, padx=8
         )
-        tk.Label(
-            admin,
-            text="Issue a 7-day license for a user, or extend the loaded license by more days / to a date. "
-            "Send them the .lic file. Keep the private key secret.",
-            anchor="w",
-            justify="left",
-            wraplength=860,
-            fg="#333",
-        ).pack(fill=tk.X, pady=(6, 0))
 
-    body = tk.Frame(root, padx=16, pady=12)
+    footer = tk.Frame(root, bg="#E8EEF5", padx=16, pady=10)
+    footer.pack(side=tk.BOTTOM, fill=tk.X)
+    generate_btn = tk.Button(
+        footer,
+        text="Generate Report",
+        command=generate,
+        width=22,
+        height=2,
+        bg="#1F4E79",
+        fg="white",
+        font=("Segoe UI", 12, "bold"),
+        activebackground="#163A5C",
+        activeforeground="white",
+    )
+    generate_btn.pack(side=tk.LEFT)
+    open_btn = tk.Button(footer, text="Open last report", command=open_report, width=16, state=tk.DISABLED)
+    open_btn.pack(side=tk.LEFT, padx=8)
+    folder_out_btn = tk.Button(
+        footer, text="Open output folder", command=lambda: open_path(Path(output_var.get())), width=18
+    )
+    folder_out_btn.pack(side=tk.LEFT)
+    refresh_btn = tk.Button(footer, text="Refresh file lists", command=refresh_lists, width=16)
+    refresh_btn.pack(side=tk.LEFT, padx=8)
+    tk.Label(
+        footer,
+        textvariable=status_var,
+        anchor="w",
+        justify="left",
+        wraplength=420,
+        bg="#E8EEF5",
+        fg="#333",
+    ).pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(12, 0))
+
+    body = tk.Frame(root, padx=16, pady=8)
     body.pack(fill=tk.BOTH, expand=True)
 
-    def folder_row(parent, label, var, browse_title, hint):
-        frame = tk.LabelFrame(parent, text=label, padx=8, pady=6)
-        frame.pack(fill=tk.X, pady=(0, 8))
-        tk.Label(frame, text=hint, anchor="w", justify="left", wraplength=840, fg="#333").pack(fill=tk.X)
+    def folder_row(parent, label, var, browse_title, hint, list_height=2):
+        frame = tk.LabelFrame(parent, text=label, padx=8, pady=4)
+        frame.pack(fill=tk.X, pady=(0, 6))
+        tk.Label(frame, text=hint, anchor="w", justify="left", wraplength=900, fg="#333").pack(fill=tk.X)
         row = tk.Frame(frame)
-        row.pack(fill=tk.X, pady=(4, 4))
+        row.pack(fill=tk.X, pady=(2, 2))
         tk.Entry(row, textvariable=var).pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(0, 8))
         btn = tk.Button(row, text="Browse this PC…", command=lambda: pick_folder(var, browse_title), width=16)
         btn.pack(side=tk.LEFT)
-        listing = tk.Listbox(frame, height=4)
+        listing = tk.Listbox(frame, height=list_height)
         listing.pack(fill=tk.X)
         return btn, listing
 
@@ -455,19 +479,12 @@ def launch_gui():
         "1. Input Folder  (files used for comparing)",
         input_var,
         "Select Input Folder — contains 5G / 4G / 3G / 2G subfolders",
-        "Put dumps inside Input\\5G, Input\\4G, Input\\3G, Input\\2G. Any file names. "
-        "Tick the networks below; only those folders are searched. Sheet names that match an MO are used as that object.",
+        "Put dumps in Input\\5G, Input\\4G, Input\\3G, Input\\2G. Tick the networks below; only those folders are searched.",
     )
-    rat_frame = tk.LabelFrame(body, text="Search these networks (Input subfolders)", padx=8, pady=6)
-    rat_frame.pack(fill=tk.X, pady=(0, 8))
-    tk.Label(
-        rat_frame,
-        text="Select 5G / 4G / 3G / 2G. The tool looks only in those folders for the inconsistency report.",
-        anchor="w",
-        fg="#333",
-    ).pack(fill=tk.X)
+    rat_frame = tk.LabelFrame(body, text="Search these networks (Input subfolders)", padx=8, pady=4)
+    rat_frame.pack(fill=tk.X, pady=(0, 6))
     rat_row = tk.Frame(rat_frame)
-    rat_row.pack(fill=tk.X, pady=(4, 0))
+    rat_row.pack(fill=tk.X)
     rat_colors = {"5G": "#6A1B9A", "4G": "#1565C0", "3G": "#2E7D32", "2G": "#E65100"}
     for rat in audit.smart.RAT_FOLDERS:
         btn = tk.Checkbutton(
@@ -490,19 +507,12 @@ def launch_gui():
         "2. Reference Folder  (recommended / plan values)",
         reference_var,
         "Select Reference Folder — every workbook is a reference",
-        "Any file names (2, 3, 4… files). The three columns used to find each parameter are "
-        "MML Object, Parameter ID, and Parameter Name. Proposed / Recommend values and other columns are detected automatically.",
+        "Identity columns: MML Object, Parameter ID, Parameter Name. Proposed / Recommend values are detected automatically.",
     )
-    out_frame = tk.LabelFrame(body, text="3. Output Folder  (inconsistency reports)", padx=8, pady=6)
-    out_frame.pack(fill=tk.X, pady=(0, 8))
-    tk.Label(
-        out_frame,
-        text="All Excel / Markdown / CSV reports are written here.",
-        anchor="w",
-        fg="#333",
-    ).pack(fill=tk.X)
+    out_frame = tk.LabelFrame(body, text="3. Output Folder  (inconsistency reports)", padx=8, pady=4)
+    out_frame.pack(fill=tk.X, pady=(0, 6))
     out_row = tk.Frame(out_frame)
-    out_row.pack(fill=tk.X, pady=(4, 0))
+    out_row.pack(fill=tk.X)
     tk.Entry(out_row, textvariable=output_var).pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(0, 8))
     out_btn = tk.Button(
         out_row,
@@ -512,38 +522,10 @@ def launch_gui():
     )
     out_btn.pack(side=tk.LEFT)
 
-    action = tk.Frame(body)
-    action.pack(fill=tk.X, pady=8)
-    generate_btn = tk.Button(
-        action, text="Generate Report", command=generate, width=22, bg="#1F4E79", fg="white"
-    )
-    generate_btn.pack(side=tk.LEFT)
-    open_btn = tk.Button(action, text="Open last report", command=open_report, width=16, state=tk.DISABLED)
-    open_btn.pack(side=tk.LEFT, padx=8)
-    folder_out_btn = tk.Button(
-        action, text="Open output folder", command=lambda: open_path(Path(output_var.get())), width=18
-    )
-    folder_out_btn.pack(side=tk.LEFT)
-    refresh_btn = tk.Button(action, text="Refresh file lists", command=refresh_lists, width=16)
-    refresh_btn.pack(side=tk.LEFT, padx=8)
-
     action_buttons = [input_btn, ref_btn, generate_btn, out_btn, folder_out_btn, refresh_btn]
 
-    tk.Label(
-        body,
-        text=(
-            "Note: Microsoft Excel allows 1,048,576 rows and 16,384 columns per sheet. "
-            "This tool does not add a lower limit on files, sheets, or columns. "
-            "Very large dumps use more RAM and take longer."
-        ),
-        anchor="w",
-        wraplength=860,
-        justify="left",
-        fg="#444",
-    ).pack(fill=tk.X, pady=(0, 4))
-    tk.Label(body, textvariable=status_var, anchor="w", wraplength=860, justify="left").pack(fill=tk.X, pady=(0, 4))
-    log_box = tk.Text(body, height=8, wrap=tk.WORD)
-    log_box.pack(fill=tk.BOTH, expand=True)
+    log_box = tk.Text(body, height=5, wrap=tk.WORD)
+    log_box.pack(fill=tk.BOTH, expand=True, pady=(4, 0))
 
     refresh_lists()
     refresh_license()

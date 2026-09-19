@@ -50,7 +50,7 @@ How to run
    Or click Load license file… and pick the file.
 5. Double-click ParameterAudit.exe
 6. Tick 5G / 4G / 3G / 2G — only those Input folders are searched
-7. Click Generate Report
+7. Click **Generate Report** (always shown at the bottom of the window)
 8. Reports are written to the Output folder (and opened if you choose)
 
 You can also Browse this PC and point the app at folders that already exist
