@@ -47,14 +47,30 @@ def test_rats_and_split():
 
 def test_band_families():
     assert smart.family_for_band(8) == "L900"
+    assert smart.family_for_band(8.0) == "L900"
+    assert smart.family_for_band("8.0") == "L900"
+    assert smart.family_for_band("Frequency Band 8") == "L900"
+    assert smart.family_for_band("L9") == "L900"
+    assert smart.family_for_band("L09") == "L900"
+    assert smart.family_for_band("L900") == "L900"
+    assert smart.family_for_band("SITE_L09A") == "L900"
     assert smart.family_for_band("3") == "L1800"
+    assert smart.family_for_band("L18") == smart.family_for_band("L1800") == "L1800"
     assert smart.family_for_band(1) == "L2100"
+    assert smart.family_for_band("L21") == smart.family_for_band("L2100") == "L2100"
     assert smart.family_for_band(41) == "L2600"
     assert smart.family_for_band("N41") == "L2600"
+    assert smart.family_for_band("L26") == smart.family_for_band("L2600") == "L2600"
+    assert smart.family_for_band(7) == "L2600"
+    # Frequency Band 3 is L18/1800, never L26/2600
+    assert smart.family_for_band(3) != "L2600"
     assert smart.band_matches("L09", smart.tokens_for_family("L900", 8))
     assert smart.band_matches("L9", smart.tokens_for_family("L900", 8))
+    assert smart.band_matches("L900", smart.tokens_for_family("L900", "Frequency Band 8"))
     assert smart.band_matches("L26", smart.tokens_for_family("L2600", "N41"))
+    assert smart.band_matches("L2600", smart.tokens_for_family("L2600", 41))
     assert not smart.band_matches("L18", smart.tokens_for_family("L900", 8))
+    assert not smart.band_matches("L26", smart.tokens_for_family("L1800", 3))
 
 
 def test_recommend_parser():
@@ -80,6 +96,12 @@ def test_recommend_parser():
     ctx26 = smart.RowContext(band_family="L2600", band_tokens=smart.tokens_for_family("L2600", 41))
     value, _note = smart.select_recommend(oneline, ctx26)
     assert value == "-115"
+
+    aliases = smart.parse_recommend("L900:-74 L1800:-118 L2100:-118 L2600:-115")
+    assert aliases.has_conditional
+    dump8 = smart.RowContext(band_family="L900", band_tokens=smart.tokens_for_family("L900", 8.0))
+    value, _note = smart.select_recommend(aliases, dump8)
+    assert value == "-74"
 
     grouped = smart.parse_recommend(
         "(InterFreqHoGroupId=1)=>L09=-108\n"

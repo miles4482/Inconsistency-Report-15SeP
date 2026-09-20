@@ -21,12 +21,27 @@ RAT_ALIASES = {
     "2G": ("2G", "2g", "GSM", "gsm"),
 }
 
-# LTE EARFCN / NR operating-band → the L09/L18/L21/L26 families used in plan files.
+# Plan-file names L9/L09/L900 are the SAME family as dump Frequency Band 8, etc.
+# L26/L2600 is 2600 MHz (3GPP 41 / 7 / 38). Frequency Band 3 is L18/1800, not L26.
 BAND_FAMILIES = {
-    "L900": frozenset({"L9", "L09", "L090", "L900", "B8", "BAND8", "NB8", "8", "900"}),
-    "L1800": frozenset({"L18", "L1800", "B3", "BAND3", "NB3", "3", "1800"}),
-    "L2100": frozenset({"L21", "L2100", "B1", "BAND1", "NB1", "1", "2100"}),
-    "L2600": frozenset({"L26", "L2600", "B41", "BAND41", "NB41", "N41", "NR41", "41", "2600"}),
+    "L900": frozenset({
+        "L9", "L09", "L090", "L900", "L0900", "900", "900M", "900MHZ",
+        "B8", "BAND8", "NB8", "N8", "8",
+    }),
+    "L1800": frozenset({
+        "L18", "L180", "L1800", "1800", "1800M", "1800MHZ",
+        "B3", "BAND3", "NB3", "N3", "3",
+    }),
+    "L2100": frozenset({
+        "L21", "L210", "L2100", "2100", "2100M", "2100MHZ",
+        "B1", "BAND1", "NB1", "N1", "1",
+    }),
+    "L2600": frozenset({
+        "L26", "L260", "L2600", "2600", "2600M", "2600MHZ",
+        "B41", "BAND41", "NB41", "N41", "NR41", "41",
+        "B7", "BAND7", "NB7", "N7", "7",
+        "B38", "BAND38", "N38", "38",
+    }),
 }
 
 EARFCN_TO_FAMILY = {
@@ -34,6 +49,8 @@ EARFCN_TO_FAMILY = {
     "3": "L1800",
     "1": "L2100",
     "41": "L2600",
+    "7": "L2600",
+    "38": "L2600",
 }
 
 SHEET_ALIASES = {
@@ -86,10 +103,15 @@ CELL_NAME_HEADER_KEYS = (
 )
 BAND_HEADER_KEYS = (
     "FREQUENCYBAND",
+    "FREQUENCYBANDINDICATOR",
     "FREQBAND",
+    "DLBAND",
+    "EUTRANBAND",
+    "NRBAND",
     "BAND",
     "BANDIND",
     "OPERATINGBAND",
+    "OPERATINGBANDINDEX",
 )
 GROUP_HEADER_KEYS = (
     "INTERFREQHOGROUPID",
@@ -107,6 +129,15 @@ NON_ALNUM = re.compile(r"[^A-Z0-9]+")
 
 BAND_TOKEN = r"(?:L0?9(?:00)?|L18(?:00)?|L21(?:00)?|L26(?:00)?|N\d{1,3}|B\d{1,3})"
 BAND_TOKEN_RE = re.compile(rf"\b({BAND_TOKEN})\b", re.I)
+BAND_EMBEDDED_RE = re.compile(
+    r"(L900|L0900|L090|L09|L9(?!\d)|L1800|L18(?!\d)|L2100|L21(?!\d)|L2600|L26(?!\d)|NR41|N41)",
+    re.I,
+)
+FREQ_BAND_PHRASE_RE = re.compile(
+    r"(?:FREQUENCY\s*BAND|FREQ(?:UENCY)?\s*BAND|BAND(?:\s*IND(?:ICATOR)?)?|"
+    r"E-?UTRA(?:N)?(?:\s*BAND)?|OPERATING\s*BAND)[\s:=_-]*(\d{1,3})(?:\.0+)?\s*$",
+    re.I,
+)
 BAND_VALUE_RE = re.compile(
     rf"\b({BAND_TOKEN})(?:\s*/\s*{BAND_TOKEN})*\s*[:=\uff1a]\s*(.+?)"
     rf"(?=\s+{BAND_TOKEN}\s*[:=\uff1a]|$|\n|;|,)",
@@ -276,24 +307,66 @@ def split_parameter_id(pid: str) -> tuple[str | None, str | None]:
     return attr_name, switch_name
 
 
-def family_for_band(raw) -> str | None:
+def _coerce_band_text(raw) -> str:
+    """Excel/pyxlsb often stores Frequency band as 8.0; treat that as 8."""
+    if raw is None or isinstance(raw, bool):
+        return ""
+    if isinstance(raw, float):
+        if raw.is_integer():
+            return str(int(raw))
+        return str(raw)
+    if isinstance(raw, int):
+        return str(raw)
     text = clean_text(raw)
+    if re.fullmatch(r"-?\d+\.0+", text):
+        return text.split(".", 1)[0]
+    return text
+
+
+def family_for_band(raw) -> str | None:
+    """L9, L09, L900, Band 8, Frequency Band 8, 8, and 8.0 are the same family."""
+    text = _coerce_band_text(raw)
     if not text:
         return None
     compact = text.upper().replace(" ", "")
-    if compact.startswith("N") and compact[1:].isdigit():
-        if compact in {"N41", "NR41"} or compact[1:] == "41":
-            return "L2600"
-        return compact
     key = norm_key(text)
-    if key in EARFCN_TO_FAMILY:
+
+    if key.isdigit() and key in EARFCN_TO_FAMILY:
         return EARFCN_TO_FAMILY[key]
+    if compact in EARFCN_TO_FAMILY:
+        return EARFCN_TO_FAMILY[compact]
+
+    if compact.startswith("N") and compact[1:].isdigit():
+        if compact in {"N41", "NR41"} or compact[1:] in {"41", "7", "38"}:
+            return "L2600"
+        if compact[1:] in EARFCN_TO_FAMILY:
+            return EARFCN_TO_FAMILY[compact[1:]]
+
+    alias_keys = {}
     for family, tokens_set in BAND_FAMILIES.items():
-        if compact in tokens_set or key in {norm_key(t) for t in tokens_set}:
-            return family
+        alias_keys[norm_key(family)] = family
+        for tok in tokens_set:
+            alias_keys[norm_key(tok)] = family
+    if key in alias_keys:
+        return alias_keys[key]
+    if compact in {t.upper() for tokens_set in BAND_FAMILIES.values() for t in tokens_set}:
+        for family, tokens_set in BAND_FAMILIES.items():
+            if compact in {t.upper() for t in tokens_set}:
+                return family
+
+    embedded = BAND_EMBEDDED_RE.search(text)
+    if embedded:
+        return family_for_band(embedded.group(1))
+
+    phrase = FREQ_BAND_PHRASE_RE.search(text)
+    if phrase:
+        return EARFCN_TO_FAMILY.get(phrase.group(1).lstrip("0") or phrase.group(1)) or family_for_band(phrase.group(1))
+
     match = BAND_TOKEN_RE.search(text)
     if match:
-        return family_for_band(match.group(1))
+        token = match.group(1)
+        if norm_key(token) != key:
+            return family_for_band(token)
     return None
 
 
@@ -305,17 +378,25 @@ def tokens_for_family(family: str | None, raw=None) -> set[str]:
     if family and family not in BAND_FAMILIES:
         out.add(norm_key(family))
     if raw is not None and not is_empty(raw):
-        out.add(norm_key(raw))
-        tok = BAND_TOKEN_RE.search(clean_text(raw))
-        if tok:
-            out.add(norm_key(tok.group(1)))
+        text = _coerce_band_text(raw)
+        out.add(norm_key(text))
+        found = family_for_band(raw)
+        if found:
+            out.add(norm_key(found))
+            out |= {norm_key(t) for t in BAND_FAMILIES.get(found, ())}
     return {t for t in out if t}
 
 
 def band_matches(rule_band: str, cell_tokens: set[str]) -> bool:
-    family = family_for_band(rule_band)
-    wanted = tokens_for_family(family, rule_band)
+    """True when recommend L9/L09/L900 and dump Frequency Band 8 (same family)."""
+    rule_family = family_for_band(rule_band)
     cell = {norm_key(t) for t in cell_tokens if t}
+    if rule_family:
+        if any(family_for_band(t) == rule_family for t in cell):
+            return True
+        if rule_family in cell or norm_key(rule_family) in cell:
+            return True
+    wanted = tokens_for_family(rule_family, rule_band)
     if not wanted or not cell:
         return False
     return bool(wanted & cell)
@@ -540,13 +621,22 @@ def cell_from_row(headers, header_norm, row, indexes=None) -> RowContext:
     site = value_at(indexes.get("site"))
     cell_id = value_at(indexes.get("cell_id"))
     cell_name = value_at(indexes.get("cell_name"))
-    band_raw = value_at(indexes.get("band"))
+    band_idx = indexes.get("band")
+    band_raw_orig = None
+    if band_idx is not None and row is not None and band_idx < len(row):
+        band_raw_orig = row[band_idx]
+    band_raw = _coerce_band_text(band_raw_orig) if band_raw_orig is not None else value_at(indexes.get("band"))
     groups = {}
     for gkey, idx in indexes.get("groups") or []:
         raw = value_at(idx)
         if raw:
             groups.setdefault(gkey, set()).add(raw)
-    family = family_for_band(band_raw) if band_raw else None
+    family = family_for_band(band_raw_orig if band_raw_orig is not None else band_raw)
+    if family is None and cell_name:
+        family = family_for_band(cell_name)
+    band_tokens = tokens_for_family(family, band_raw_orig if band_raw_orig is not None else band_raw)
+    if cell_name:
+        band_tokens |= tokens_for_family(family_for_band(cell_name), cell_name)
     return RowContext(
         site=site,
         cell_id=cell_id,
@@ -554,7 +644,7 @@ def cell_from_row(headers, header_norm, row, indexes=None) -> RowContext:
         cell_key=combined_cell_key(site, cell_id) if site and cell_id else "",
         band_raw=band_raw,
         band_family=family,
-        band_tokens=tokens_for_family(family, band_raw),
+        band_tokens=band_tokens,
         groups=groups,
     )
 

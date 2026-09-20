@@ -30,7 +30,7 @@ python3 scripts/license_generator_app.py
 
 ## Windows app
 
-Download [`packages/ParameterAudit_Windows_v1.7.0.rar`](packages/ParameterAudit_Windows_v1.7.0.rar) (also [`ParameterAudit_Windows.rar`](packages/ParameterAudit_Windows.rar)), extract the folder, then run `ParameterAudit.exe`. The window title shows **v1.7.0**.
+Download [`packages/ParameterAudit_Windows_v1.8.0.rar`](packages/ParameterAudit_Windows_v1.8.0.rar) (also [`ParameterAudit_Windows.rar`](packages/ParameterAudit_Windows.rar)), extract the folder, then run `ParameterAudit.exe`. The window title shows **v1.8.0**.
 
 The extracted folder already contains `Input`, `Reference`, and `Output`. Drop files in, then Generate Report — or Browse this PC to other folders.
 
@@ -70,7 +70,7 @@ Latest copies:
 - `Parameter ID` of the form `SwitchName@Attribute`: before `@` is the switch/bit, after `@` is the parameter (column).
 - Recommended / proposed values are either a **direct** parameter value (`1`, `ON`, `-108`) or **named switches/bits** inside that parameter (`GeranCsftbSwitch-1`, or several joined by `&`). Named switches are looked up inside the dump **Parameter Name** column; other options packed in the same cell are ignored.
 - `Parameter Name` is the dump display name and is matched first.
-- 4G `Cell` maps `Local cell ID` (and eNodeB) and Frequency band 8/3/1/41 to L09/L18/L21/L26. 5G `NRDUCELL` maps `NR DU Cell ID` (N41 → L26 family). Only those two sheets are read for the band map; other MOs are not pre-indexed.
+- 4G `Cell` maps `Local cell ID` to band families (L9 = L09 = L900 = Frequency Band 8; L18 = L1800 = Band 3; L21 = L2100 = Band 1; L26 = L2600 = Band 41/7). 5G `NRDUCELL` maps `NR DU Cell ID` (N41 → L26). Only those two sheets are read for the band map.
 - Proposed values such as `L9:-74 L18:-118 L21:-118 L26:-115` or `(InterFreqHoGroupId=1)=>L09=-108` are applied only to cells where that band/group applies. Group ID is taken from the current MO row when present.
 - Built-in name thinking (aliases + fuzzy match) corrects mistyped MO / parameter / sheet names. No cloud AI is used.
 - Other workbooks are matched by sheet name and column name.
