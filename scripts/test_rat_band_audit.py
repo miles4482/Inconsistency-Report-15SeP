@@ -71,6 +71,16 @@ def test_band_families():
     assert smart.band_matches("L2600", smart.tokens_for_family("L2600", 41))
     assert not smart.band_matches("L18", smart.tokens_for_family("L900", 8))
     assert not smart.band_matches("L26", smart.tokens_for_family("L1800", 3))
+    assert smart.family_for_band("DHAPT08") is None
+    import time
+    toks = smart.tokens_for_family("L900", 8)
+    t0 = time.perf_counter()
+    for _ in range(20000):
+        assert smart.band_matches("L9", toks)
+        assert smart.band_matches("L09", toks)
+        assert smart.band_matches("L900", toks)
+    elapsed = time.perf_counter() - t0
+    assert elapsed < 1.0, f"band alias matching too slow: {elapsed:.2f}s"
 
 
 def test_recommend_parser():

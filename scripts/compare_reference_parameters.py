@@ -2671,12 +2671,13 @@ def execute_folder_audit(
             f"{len(band_map.by_cell_id)} cells from {', '.join(band_map._loaded_sheets) or 'no Cell/NRDUCELL sheet'}"
         )
     progress("Comparing each reference parameter against selected input files...")
+    total = len(params)
     for i, param in enumerate(params, start=1):
         resolved, result = store.compare_param(param)
         param["resolved"] = resolved
         param["result"] = result
-        if i % 40 == 0:
-            progress(f"  {i}/{len(params)}")
+        label = param.get("param_name") or param.get("pid") or param.get("mml") or ""
+        progress(f"  {i}/{total}  {label}")
     summary, func_summary = summarize(params)
     progress("Writing reports to the Output Folder...")
     extras = write_excel(params, summary, func_summary, run)

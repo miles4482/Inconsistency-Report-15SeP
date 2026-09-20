@@ -134,8 +134,8 @@ BAND_EMBEDDED_RE = re.compile(
     re.I,
 )
 FREQ_BAND_PHRASE_RE = re.compile(
-    r"(?:FREQUENCY\s*BAND|FREQ(?:UENCY)?\s*BAND|BAND(?:\s*IND(?:ICATOR)?)?|"
-    r"E-?UTRA(?:N)?(?:\s*BAND)?|OPERATING\s*BAND)[\s:=_-]*(\d{1,3})(?:\.0+)?\s*$",
+    r"(?:FREQUENCY\s*BAND|FREQ(?:UENCY)?\s*BAND|BAND\s*IND(?:ICATOR)?|"
+    r"E-?UTRA(?:N)?\s*BAND|OPERATING\s*BAND)[\s:=_-]*(\d{1,3})(?:\.0+)?",
     re.I,
 )
 BAND_VALUE_RE = re.compile(
@@ -323,83 +323,87 @@ def _coerce_band_text(raw) -> str:
     return text
 
 
+def _alias_map() -> dict:
+    """Built once: L9/L09/L900/8 → L900, etc."""
+    cached = getattr(_alias_map, "_map", None)
+    if cached is not None:
+        return cached
+    mapping = dict(EARFCN_TO_FAMILY)
+    for family, tokens_set in BAND_FAMILIES.items():
+        mapping[norm_key(family)] = family
+        mapping[family.upper()] = family
+        for tok in tokens_set:
+            mapping[norm_key(tok)] = family
+            mapping[str(tok).upper().replace(" ", "")] = family
+    _alias_map._map = mapping
+    return mapping
+
+
 def family_for_band(raw) -> str | None:
     """L9, L09, L900, Band 8, Frequency Band 8, 8, and 8.0 are the same family."""
     text = _coerce_band_text(raw)
     if not text:
         return None
-    compact = text.upper().replace(" ", "")
+    aliases = _alias_map()
     key = norm_key(text)
-
-    if key.isdigit() and key in EARFCN_TO_FAMILY:
-        return EARFCN_TO_FAMILY[key]
-    if compact in EARFCN_TO_FAMILY:
-        return EARFCN_TO_FAMILY[compact]
-
+    if key in aliases:
+        return aliases[key]
+    compact = text.upper().replace(" ", "")
+    if compact in aliases:
+        return aliases[compact]
     if compact.startswith("N") and compact[1:].isdigit():
-        if compact in {"N41", "NR41"} or compact[1:] in {"41", "7", "38"}:
-            return "L2600"
-        if compact[1:] in EARFCN_TO_FAMILY:
-            return EARFCN_TO_FAMILY[compact[1:]]
-
-    alias_keys = {}
-    for family, tokens_set in BAND_FAMILIES.items():
-        alias_keys[norm_key(family)] = family
-        for tok in tokens_set:
-            alias_keys[norm_key(tok)] = family
-    if key in alias_keys:
-        return alias_keys[key]
-    if compact in {t.upper() for tokens_set in BAND_FAMILIES.values() for t in tokens_set}:
-        for family, tokens_set in BAND_FAMILIES.items():
-            if compact in {t.upper() for t in tokens_set}:
-                return family
+        if compact[1:] in aliases:
+            return aliases[compact[1:]]
 
     embedded = BAND_EMBEDDED_RE.search(text)
     if embedded:
-        return family_for_band(embedded.group(1))
+        found = aliases.get(norm_key(embedded.group(1)))
+        if found:
+            return found
 
     phrase = FREQ_BAND_PHRASE_RE.search(text)
     if phrase:
-        return EARFCN_TO_FAMILY.get(phrase.group(1).lstrip("0") or phrase.group(1)) or family_for_band(phrase.group(1))
-
-    match = BAND_TOKEN_RE.search(text)
-    if match:
-        token = match.group(1)
-        if norm_key(token) != key:
-            return family_for_band(token)
+        num = phrase.group(1).lstrip("0") or phrase.group(1)
+        return aliases.get(num) or aliases.get(norm_key(num))
     return None
 
 
 def tokens_for_family(family: str | None, raw=None) -> set[str]:
     out = set()
-    if family and family in BAND_FAMILIES:
-        out |= {norm_key(t) for t in BAND_FAMILIES[family]}
+    if family:
         out.add(norm_key(family))
-    if family and family not in BAND_FAMILIES:
-        out.add(norm_key(family))
+        out.add(family)
+        if family in BAND_FAMILIES:
+            out |= {norm_key(t) for t in BAND_FAMILIES[family]}
     if raw is not None and not is_empty(raw):
         text = _coerce_band_text(raw)
-        out.add(norm_key(text))
+        if text:
+            out.add(norm_key(text))
         found = family_for_band(raw)
         if found:
             out.add(norm_key(found))
-            out |= {norm_key(t) for t in BAND_FAMILIES.get(found, ())}
+            out.add(found)
     return {t for t in out if t}
 
 
 def band_matches(rule_band: str, cell_tokens: set[str]) -> bool:
     """True when recommend L9/L09/L900 and dump Frequency Band 8 (same family)."""
     rule_family = family_for_band(rule_band)
-    cell = {norm_key(t) for t in cell_tokens if t}
-    if rule_family:
-        if any(family_for_band(t) == rule_family for t in cell):
-            return True
-        if rule_family in cell or norm_key(rule_family) in cell:
-            return True
-    wanted = tokens_for_family(rule_family, rule_band)
-    if not wanted or not cell:
+    if not rule_family:
         return False
-    return bool(wanted & cell)
+    aliases = _alias_map()
+    wanted = norm_key(rule_family)
+    for raw in cell_tokens:
+        if not raw:
+            continue
+        token = raw if isinstance(raw, str) else str(raw)
+        key = token if token.isupper() and token.isalnum() else norm_key(token)
+        if key == wanted or token == rule_family:
+            return True
+        fam = aliases.get(key)
+        if fam == rule_family:
+            return True
+    return False
 
 
 def combined_cell_key(site, cell_id) -> str:
@@ -633,10 +637,15 @@ def cell_from_row(headers, header_norm, row, indexes=None) -> RowContext:
             groups.setdefault(gkey, set()).add(raw)
     family = family_for_band(band_raw_orig if band_raw_orig is not None else band_raw)
     if family is None and cell_name:
-        family = family_for_band(cell_name)
-    band_tokens = tokens_for_family(family, band_raw_orig if band_raw_orig is not None else band_raw)
-    if cell_name:
-        band_tokens |= tokens_for_family(family_for_band(cell_name), cell_name)
+        embedded = BAND_EMBEDDED_RE.search(cell_name)
+        if embedded:
+            family = family_for_band(embedded.group(1))
+    band_tokens = set()
+    if family:
+        band_tokens.add(family)
+        band_tokens.add(norm_key(family))
+    if band_raw:
+        band_tokens.add(norm_key(band_raw))
     return RowContext(
         site=site,
         cell_id=cell_id,

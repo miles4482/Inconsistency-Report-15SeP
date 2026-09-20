@@ -1,4 +1,4 @@
-Parameter Inconsistency Audit v1.8.0 — Windows folder app
+Parameter Inconsistency Audit v1.8.1 — Windows folder app
 ==================================================
 
 This package is a FOLDER (not a single packed exe). Extract it, then run
@@ -33,7 +33,7 @@ Three folders (created next to the .exe)
 
 How to run
 ----------
-1. Extract ParameterAudit_Windows_v1.8.0.rar to any drive (for example D:\ParameterAudit).
+1. Extract ParameterAudit_Windows_v1.8.1.rar to any drive (for example D:\ParameterAudit).
 2. Put dumps into the matching Input network folder:
      Input\5G   Input\4G   Input\3G   Input\2G
      - Any file names; more than one file; no file-count limit
