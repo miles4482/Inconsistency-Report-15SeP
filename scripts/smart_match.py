@@ -153,6 +153,10 @@ UNIT_TAIL_RE = re.compile(r"(DBM|DB|MHZ|KHZ|MS|MIN|SEC)$")
 GROUP_LINE_RE = re.compile(
     r"\(\s*([A-Za-z][A-Za-z0-9_]*)\s*=\s*([^)]+?)\s*\)\s*(?:=>|=)?\s*(.*)$",
 )
+# Reference Conditions column: "Interfreq handover group ID=0" or
+# "Interfreq handover group ID (INTERFREQHOGROUPID)=1". Excel wrap is collapsed.
+CONDITION_EQ_RE = re.compile(r"^\s*(.+?)\s*(?:=|==|:)\s*(.+?)\s*$")
+SHORT_IN_PARENS_RE = re.compile(r"^(.*?)\s*\(([^)]+)\)\s*$")
 
 
 def norm_key(value) -> str:
@@ -309,8 +313,15 @@ def split_parameter_id(pid: str) -> tuple[str | None, str | None]:
 
 def _coerce_band_text(raw) -> str:
     """Excel/pyxlsb often stores Frequency band as 8.0; treat that as 8."""
-    if raw is None or isinstance(raw, bool):
+    return canon_id_value(raw)
+
+
+def canon_id_value(raw) -> str:
+    """0, 0.0, '0' → '0' so Interfreq handover group ID matches Excel numbers."""
+    if raw is None:
         return ""
+    if isinstance(raw, bool):
+        return "1" if raw else "0"
     if isinstance(raw, float):
         if raw.is_integer():
             return str(int(raw))
@@ -408,6 +419,99 @@ def band_matches(rule_band: str, cell_tokens: set[str]) -> bool:
 
 def combined_cell_key(site, cell_id) -> str:
     return f"{clean_text(site)}+{clean_text(cell_id)}"
+
+
+@dataclass
+class ConditionClause:
+    """One dump-column filter from the Reference Conditions column."""
+
+    display_name: str
+    short_name: str | None = None
+    value: str = ""
+    raw: str = ""
+
+    def labels(self) -> list[str]:
+        out = []
+        if self.display_name:
+            out.append(self.display_name)
+        if self.short_name:
+            out.append(self.short_name)
+        return out
+
+
+def parse_conditions(value) -> list[ConditionClause]:
+    """Parse Conditions such as Interfreq handover group ID (INTERFREQHOGROUPID)=0.
+
+    Empty Conditions means no row filter. Several clauses (semicolon / AND)
+    must all match. Excel wrap/newlines inside the name are collapsed to spaces.
+    Short name in brackets is the dump Parameter ID.
+    """
+    raw = clean_text(value)
+    if not raw:
+        return []
+    blob = raw.replace("\r\n", " ").replace("\r", " ").replace("\n", " ")
+    blob = " ".join(blob.split())
+    chunks = [chunk for chunk in re.split(r"\s*;\s+|\s+\bAND\b\s+", blob, flags=re.I) if clean_text(chunk)]
+    if not chunks:
+        chunks = [blob]
+    clauses: list[ConditionClause] = []
+    for chunk in chunks:
+        clause = _parse_one_condition(clean_text(chunk))
+        if clause:
+            clauses.append(clause)
+    if not clauses:
+        clause = _parse_one_condition(blob)
+        if clause:
+            clauses.append(clause)
+    return clauses
+
+
+def _parse_one_condition(text: str) -> ConditionClause | None:
+    match = CONDITION_EQ_RE.match(text)
+    if not match:
+        return None
+    name, val = clean_text(match.group(1)), canon_id_value(match.group(2))
+    if not name or val == "":
+        return None
+    short = None
+    paren = SHORT_IN_PARENS_RE.match(name)
+    if paren:
+        name = clean_text(paren.group(1))
+        short = clean_text(paren.group(2)) or None
+        if not name:
+            name = short or ""
+            short = None
+    if not name:
+        return None
+    return ConditionClause(display_name=name, short_name=short, value=val, raw=text)
+
+
+def condition_name_keys(clause: ConditionClause) -> list[str]:
+    """Normalized dump-header keys for a Conditions clause, including group-ID aliases."""
+    keys: list[str] = []
+    seen: set[str] = set()
+
+    def add(item: str):
+        nk = norm_key(item)
+        if nk and nk not in seen:
+            keys.append(nk)
+            seen.add(nk)
+
+    for label in clause.labels():
+        add(label)
+        add(header_match_key(label))
+        for canonical, alts in GROUP_NAME_ALIASES.items():
+            bag = {canonical, *{norm_key(a) for a in alts}}
+            if norm_key(label) in bag:
+                for item in bag:
+                    add(item)
+    for gkey in GROUP_HEADER_KEYS:
+        gn = norm_key(gkey)
+        if gn in seen:
+            continue
+        if any(k in gn or gn in k for k in list(seen) if len(k) >= 6):
+            add(gn)
+    return keys
 
 
 @dataclass

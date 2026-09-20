@@ -159,6 +159,20 @@ def test_three_identity_columns():
     # Default Value must not be treated as the recommend/proposed value
     assert mapping2["recommend"] == 4
 
+    mobility = [
+        "MO Name",
+        "Parameter ID",
+        "Parameter Name",
+        "Default Value",
+        "Proposed Value",
+        "Conditions",
+        "Targ. t/Impact",
+    ]
+    mapping3 = audit.detect_ref_header_map(mobility)
+    assert mapping3["recommend"] == 4
+    assert mapping3["conditions"] == 5
+    assert mapping3["recommend"] != mapping3["conditions"]
+
 
 def test_fuzzy_names():
     hit, score, why = smart.closest_name("CelAlgoSwitch", ["CellAlgoSwitch", "CellMLB"], cutoff=0.8)
@@ -413,6 +427,134 @@ def test_switch_bits_inside_parameter_column():
     assert num_out["match_count"] == 2
 
 
+def test_conditions_group_id_filter():
+    """Conditions Interfreq handover group ID=0 audits only matching dump rows."""
+    wrapped = "Interfreq handover group\nID=0"
+    clauses = smart.parse_conditions(wrapped)
+    assert len(clauses) == 1
+    assert clauses[0].value == "0"
+    assert smart.norm_key(clauses[0].display_name) == "INTERFREQHANDOVERGROUPID"
+
+    named = smart.parse_conditions("Interfreq handover group ID (INTERFREQHOGROUPID)=1")
+    assert named[0].value == "1"
+    assert named[0].short_name == "INTERFREQHOGROUPID"
+    assert "INTERFREQHOGROUPID" in smart.condition_name_keys(named[0])
+    assert smart.canon_id_value(0.0) == "0"
+    assert smart.canon_id_value(1) == "1"
+
+    headers = [
+        "*eNodeB Name",
+        "*Local cell ID",
+        "*Interfreq handover group ID",
+        "AAAS Based Interfreq A1 RSRP Threshold(dBm)",
+        "Load Based Interfreq RSRP threshold",
+    ]
+    # One Local cell ID exists twice: group 0 = Data, group 1 = VoLTE
+    rows = [
+        ["TNMdp05", 11, 0, -74, -103],
+        ["TNMdp05", 11, 1, -90, -105],
+        ["TNMdp05", 14, 0.0, -118, -103],
+        ["TNMdp05", 14, 1, -90, -105],
+        ["TNMdp05", 20, 0, -118, -103],
+        ["TNMdp05", 20, 1, -90, -105],
+        ["TNMdp05", 74, 0, -115, -103],
+        ["TNMdp05", 74, 1, -90, -105],
+    ]
+    header_norm = {smart.norm_key(h): i for i, h in enumerate(headers)}
+    sheet = {
+        "headers": headers,
+        "header_index": {h: i for i, h in enumerate(headers)},
+        "header_norm": header_norm,
+        "rows": rows,
+        "identity_idx": smart.identity_indexes(header_norm, fuzzy=False),
+    }
+
+    class FakeCache:
+        def get(self, _name):
+            return sheet
+
+    cell_payload = {
+        "headers": ["*eNodeB Name", "*Local cell ID", "Frequency band"],
+        "header_index": {},
+        "header_norm": {
+            "ENODEBNAME": 0,
+            "LOCALCELLID": 1,
+            "FREQUENCYBAND": 2,
+        },
+        "rows": [
+            ["TNMdp05", 11, 8],
+            ["TNMdp05", 14, 3],
+            ["TNMdp05", 20, 1],
+            ["TNMdp05", 74, 41],
+        ],
+        "identity_idx": smart.identity_indexes(
+            {"ENODEBNAME": 0, "LOCALCELLID": 1, "FREQUENCYBAND": 2}, fuzzy=False
+        ),
+    }
+    cell_payload["header_index"] = {h: i for i, h in enumerate(cell_payload["headers"])}
+
+    class BandCache:
+        def names(self):
+            return ["Cell", "InterFreqHoGroup"]
+
+        def get(self, name):
+            if name == "Cell":
+                return cell_payload
+            return sheet
+
+    index = audit.CellBandIndex(BandCache())
+    resolved = {
+        "reason": "OK",
+        "sheet": "InterFreqHoGroup",
+        "column": "AAAS Based Interfreq A1 RSRP Threshold",
+        "bit": None,
+        "smart_note": "",
+    }
+    a1 = {
+        "pid": "InterFreqHOA1ThdRsrp",
+        "param_name": "AAAS Based Interfreq A1 RSRP Threshold",
+        "recommend": "L9: -74 L18:-118 L21:-118 L26:-115",
+        "conditions": "Interfreq handover group ID=0",
+        "mml": "InterFreqHoGroup",
+    }
+    out0 = audit.compare_param(a1, dict(resolved), FakeCache(), cell_index=index)
+    assert out0["status"] == "Consistent"
+    assert out0["objects_checked"] == 4
+    assert out0["match_count"] == 4
+    assert out0["mismatch_count"] == 0
+    assert out0["skipped_not_applicable"] == 4
+
+    a1_volte = dict(a1, conditions="Interfreq handover group ID (INTERFREQHOGROUPID)=1")
+    out1 = audit.compare_param(a1_volte, dict(resolved), FakeCache(), cell_index=index)
+    assert out1["objects_checked"] == 4
+    assert out1["match_count"] == 0
+    assert out1["mismatch_count"] == 4
+    assert out1["status"] == "Inconsistent"
+
+    none = dict(a1, conditions=None)
+    out_all = audit.compare_param(none, dict(resolved), FakeCache(), cell_index=index)
+    assert out_all["objects_checked"] == 8
+
+    load_resolved = dict(resolved, column="Load Based Interfreq RSRP threshold")
+    load = {
+        "pid": "InterFreqLoadBasedHoA4ThdRsrp",
+        "param_name": "Load Based Interfreq RSRP threshold",
+        "recommend": "-105",
+        "conditions": "Interfreq handover group ID (INTERFREQHOGROUPID)=1",
+        "mml": "InterFreqHoGroup",
+    }
+    load_out = audit.compare_param(load, load_resolved, FakeCache(), cell_index=None)
+    assert load_out["objects_checked"] == 4
+    assert load_out["match_count"] == 4
+    assert load_out["status"] == "Consistent"
+
+    missing = dict(a1, conditions="Interfreq handover group ID=9")
+    miss_out = audit.compare_param(missing, dict(resolved), FakeCache(), cell_index=index)
+    assert miss_out["objects_checked"] == 0
+    assert miss_out["status"] == "No Recommend Value"
+    assert "Conditions" in (miss_out["remark"] or "")
+
+
 def test_list_workbooks_rats():
     with tempfile.TemporaryDirectory() as raw:
         root = Path(raw)
@@ -512,10 +654,14 @@ def _build_4g_dump(path: Path):
                 "AAAS Based Interfreq A1 RSRP Threshold(dBm)",
                 "AAAS Based Interfreq A2 RSRP Threshold(dBm)",
             ],
+            [None, "DHAPT08", 11, 0, -108, -74, -99],
             [None, "DHAPT08", 11, 1, -108, -74, -99],
+            [None, "DHAPT08", 14, 0, -108, -118, -99],
             [None, "DHAPT08", 14, 1, -108, -118, -99],
+            [None, "DHAPT08", 20, 0, -108, -118, -99],
             [None, "DHAPT08", 20, 1, -100, -118, -99],
             [None, "DHAPT08", 74, 0, -108, -115, -99],
+            [None, "DHAPT08", 74, 1, -108, -115, -99],
         ],
     )
     _save(wb, path)
@@ -580,6 +726,39 @@ def _build_reference(path: Path):
                 "AAAS Based Interfreq A1 RSRP Threshold",
                 "",
                 "L9: -74 L18:-118 L21:-118 L26:-115",
+            ],
+        ],
+    )
+    _write_sheet(
+        wb,
+        "Mobility",
+        [
+            [
+                "MO Name",
+                "Parameter ID",
+                "Parameter Name",
+                "Default Value",
+                "Proposed Value",
+                "Conditions",
+                "Targ. t/Impact",
+            ],
+            [
+                "InterFreqHoGroup",
+                "InterFreqHOA1ThdRsrp",
+                "AAAS Based Interfreq A1 RSRP Threshold",
+                "-105",
+                "L9: -74 L18:-118 L21:-118 L26:-115",
+                "Interfreq handover group ID=0",
+                "Mobility",
+            ],
+            [
+                "InterFreqHoGroup",
+                "A3Offset",
+                "A3 Offset",
+                "",
+                "-108",
+                "Interfreq handover group ID (INTERFREQHOGROUPID)=1",
+                "Mobility",
             ],
         ],
     )
@@ -681,11 +860,30 @@ def test_end_to_end_audit():
         # group 0 cell skipped; L21 group 1 has -100 vs -108
         assert int(group["mismatch_count"]) >= 1
 
-        a1 = next(p for p in params if p["parameter_id"] == "InterFreqHOA1ThdRsrp")
+        a1 = next(p for p in params if p["parameter_id"] == "InterFreqHOA1ThdRsrp" and p["reference_sheet"] == "MLB Plan")
         assert a1["status"] == "Consistent"
-        assert int(a1["match_count"]) == 4
+        assert int(a1["match_count"]) == 8
         assert int(a1["mismatch_count"]) == 0
         assert "A2" not in (a1.get("config_column") or "")
+
+        cond0 = next(
+            p
+            for p in params
+            if p["parameter_id"] == "InterFreqHOA1ThdRsrp" and p["reference_sheet"] == "Mobility"
+        )
+        assert int(cond0["objects_checked"]) == 4
+        assert cond0["status"] == "Consistent"
+        assert "Interfreq handover group ID=0" in (cond0.get("conditions") or "")
+
+        cond_a3 = next(
+            p
+            for p in params
+            if p["parameter_id"] == "A3Offset" and p["reference_sheet"] == "Mobility"
+        )
+        assert int(cond_a3["objects_checked"]) == 4
+        # group-1 L21 cell 20 is -100 vs -108; other group-1 cells match
+        assert int(cond_a3["mismatch_count"]) >= 1
+        assert int(cond_a3["match_count"]) >= 1
 
         legacy = next(p for p in params if p["reference_sheet"] == "Legacy")
         assert legacy["status"] in {"Mixed / Partial", "Inconsistent", "Consistent"}
@@ -743,6 +941,7 @@ def main() -> int:
     test_cell_band_map_only_reads_cell_sheets()
     test_simple_compare_is_fast()
     test_switch_bits_inside_parameter_column()
+    test_conditions_group_id_filter()
     test_list_workbooks_rats()
     test_end_to_end_audit()
     print("rat-band-smart-audit tests passed")

@@ -151,6 +151,16 @@ REF_HEADER_ALIASES = {
         "GOLDENVALUE",
         "PLAN",
     },
+    "conditions": {
+        "CONDITIONS",
+        "CONDITION",
+        "CONDITIONCOLUMN",
+        "CONDITIONCOL",
+        "ROWCONDITION",
+        "ROWCONDITIONS",
+        "FILTERCONDITION",
+        "FILTERCONDITIONS",
+    },
 }
 
 # Microsoft Excel worksheet limits. This tool does not impose a lower cap.
@@ -950,6 +960,7 @@ def compare_param(param, resolved, cache, cell_index=None):
     counts = Counter()
     mismatches = []
     applied_notes = Counter()
+    cond_clauses = smart.parse_conditions(param.get("conditions"))
     need_ctx = spec.has_conditional
     indexes = sheet.get("identity_idx") if need_ctx else None
     bit_name = resolved.get("bit")
@@ -957,7 +968,27 @@ def compare_param(param, resolved, cache, cell_index=None):
     if rec_switch_bits and not bit_name:
         resolved["bit"] = "&".join(name for name, _exp in rec_switch_bits)
         bit_name = resolved["bit"]
+    cond_cols = []
+    if cond_clauses:
+        cond_cols, missing_cond = resolve_condition_columns(sheet, cond_clauses)
+        if missing_cond:
+            out["status"] = "Not Found in Configuration"
+            out["remark"] = (
+                "Conditions refers to dump column(s) not found on "
+                f"{resolved['sheet']}: {', '.join(missing_cond)}. "
+                "Use the dump Parameter Name and short name in brackets, "
+                "e.g. Interfreq handover group ID (INTERFREQHOGROUPID)=0"
+            )
+            return out
+    cond_suffix = ""
+    if cond_cols:
+        cond_suffix = " [" + ", ".join(
+            f"{clause.display_name}={clause.value}" for _idx, _val, clause in cond_cols
+        ) + "]"
     for row in sheet["rows"]:
+        if cond_cols and not row_matches_conditions(row, cond_cols):
+            out["skipped_not_applicable"] += 1
+            continue
         raw = row[col_idx] if col_idx < len(row) else None
         ctx = None
         if need_ctx:
@@ -1026,6 +1057,7 @@ def compare_param(param, resolved, cache, cell_index=None):
             if len(mismatches) < 8:
                 mismatches.append(
                     object_label(row, sheet["headers"], ctx)
+                    + cond_suffix
                     + f" expected {clean_text(row_recommend)} -> {display}"
                 )
             continue
@@ -1033,7 +1065,9 @@ def compare_param(param, resolved, cache, cell_index=None):
             out["missing_count"] += 1
             out["mismatch_count"] += 1
             if len(mismatches) < 8:
-                mismatches.append(object_label(row, sheet["headers"], ctx) + f" -> {display}")
+                mismatches.append(
+                    object_label(row, sheet["headers"], ctx) + cond_suffix + f" -> {display}"
+                )
             continue
         if values_match(used, row_recommend):
             out["match_count"] += 1
@@ -1042,6 +1076,7 @@ def compare_param(param, resolved, cache, cell_index=None):
             if len(mismatches) < 8:
                 mismatches.append(
                     object_label(row, sheet["headers"], ctx)
+                    + cond_suffix
                     + f" expected {clean_text(row_recommend)} -> {display}"
                 )
 
@@ -1049,6 +1084,11 @@ def compare_param(param, resolved, cache, cell_index=None):
     out["sample_mismatches"] = mismatches
     if applied_notes:
         out["applied_recommend"] = " | ".join(f"{k} ({n})" for k, n in applied_notes.most_common(8))
+    if cond_suffix:
+        note = cond_suffix.strip()
+        out["applied_recommend"] = (
+            f"{note} | {out['applied_recommend']}" if out["applied_recommend"] else note
+        )
     if param.get("no_recommend_reason") and is_empty(recommend):
         out["status"] = "No Recommend Value"
         out["remark"] = param["no_recommend_reason"]
@@ -1060,10 +1100,7 @@ def compare_param(param, resolved, cache, cell_index=None):
     if out["objects_checked"] == 0:
         if out["skipped_not_applicable"]:
             out["status"] = "No Recommend Value"
-            out["remark"] = (
-                "No cell matched the band/group conditions in Proposed/Recommended Value "
-                f"({out['skipped_not_applicable']} row(s) not applicable)."
-            )
+            out["remark"] = conditions_skip_remark(param, out["skipped_not_applicable"])
             return out
         out["status"] = "Not Found in Configuration"
         out["remark"] = "No data rows in mapped sheet"
@@ -1121,6 +1158,12 @@ HEADER_PROBES = {
         "Golden Value",
         "Expected Value",
     ),
+    "conditions": (
+        "Conditions",
+        "Condition",
+        "Condition Column",
+        "ConditionColumn",
+    ),
 }
 SKIP_AS_RECOMMEND = {
     "DEFAULTVALUE",
@@ -1137,14 +1180,23 @@ SKIP_AS_RECOMMEND = {
     "UNITS",
     "DESCRIPTION",
     "RANGE",
+    "CONDITIONS",
+    "CONDITION",
+    "CONDITIONCOLUMN",
+    "CONDITIONCOL",
+    "TARGETIMPACT",
+    "TARGIMPACT",
+    "IMPACT",
 }
 
 
 def detect_ref_header_map(header_row) -> dict:
-    """Map the three identity columns plus an adaptive recommend column.
+    """Map identity columns plus adaptive recommend and Conditions columns.
 
     Identity (always expected): MML Object, Parameter ID, Parameter Name.
-    Recommend / Proposed / Plan is found adaptively from the remaining headers.
+    Recommend / Proposed / Plan and Conditions / Condition Column are found
+    adaptively from the remaining headers. Conditions is never treated as
+    the recommended value.
     """
     mapping = {}
     used = set()
@@ -1167,7 +1219,14 @@ def detect_ref_header_map(header_row) -> dict:
         best_i = None
         best_score = 0.0
         for i, text in unused:
-            if field == "recommend" and norm_key(text) in SKIP_AS_RECOMMEND:
+            if field == "recommend" and (
+                norm_key(text) in SKIP_AS_RECOMMEND
+                or norm_key(text) in REF_HEADER_ALIASES.get("conditions", ())
+            ):
+                continue
+            if field == "conditions" and norm_key(text) in SKIP_AS_RECOMMEND - set(
+                REF_HEADER_ALIASES.get("conditions", ())
+            ):
                 continue
             for probe in probes:
                 score = smart.similarity(text, probe)
@@ -1230,6 +1289,7 @@ def load_reference_file(ref_path: Path, ref_count: int = 1):
                 + (3 if "pid" in candidate else 0)
                 + (3 if "param_name" in candidate else 0)
                 + (1 if "recommend" in candidate else 0)
+                + (1 if "conditions" in candidate else 0)
             )
             if score > best_score:
                 best_score = score
@@ -1282,6 +1342,7 @@ def load_reference_file(ref_path: Path, ref_count: int = 1):
                     "pid": pid,
                     "param_name": pname or None,
                     "recommend": rec if not is_empty(rec) else None,
+                    "conditions": clean_text(cell("conditions")) or None,
                     "no_recommend_reason": no_recommend_reason,
                     "network": guess_network_label(ref_path.name, sheet_name),
                     "sheet_is_mo": sheet_as_mo,
@@ -1322,6 +1383,64 @@ def find_column_index(sheet, name: str):
             if smart.header_match_key(header) == wanted:
                 return sheet["header_index"].get(header)
     return None
+
+
+def resolve_condition_columns(sheet, clauses):
+    """Map each Conditions clause to a dump column index (once per parameter)."""
+    resolved = []
+    missing = []
+    identity_groups = (sheet.get("identity_idx") or {}).get("groups") or []
+    group_by_key = {norm_key(key): idx for key, idx in identity_groups}
+    header_norm = sheet.get("header_norm") or {}
+    for clause in clauses:
+        idx = None
+        for label in clause.labels():
+            idx = find_column_index(sheet, label)
+            if idx is not None:
+                break
+        if idx is None:
+            for key in smart.condition_name_keys(clause):
+                if key in header_norm:
+                    idx = header_norm[key]
+                    break
+                if key in group_by_key:
+                    idx = group_by_key[key]
+                    break
+        if idx is None:
+            candidates = list(sheet.get("headers") or [])
+            for label in clause.labels():
+                hit, _score, _why = smart.closest_name(label, candidates, cutoff=0.82)
+                if hit:
+                    idx = find_column_index(sheet, hit)
+                    if idx is not None:
+                        break
+        if idx is None:
+            missing.append(clause.display_name or clause.short_name or clause.raw)
+        else:
+            resolved.append((idx, clause.value, clause))
+    return resolved, missing
+
+
+def row_matches_conditions(row, cond_cols) -> bool:
+    for idx, expected, _clause in cond_cols:
+        actual = row[idx] if row is not None and idx < len(row) else None
+        if smart.canon_id_value(actual) != expected:
+            return False
+    return True
+
+
+def conditions_skip_remark(param, skipped: int) -> str:
+    cond_txt = clean_text(param.get("conditions"))
+    if cond_txt:
+        return (
+            f"No cell matched Conditions ({cond_txt}); "
+            f"{skipped} row(s) skipped. Objects checked is the count of rows "
+            "where the group ID matches."
+        )
+    return (
+        "No cell matched the band/group conditions in Proposed/Recommended Value "
+        f"({skipped} row(s) not applicable)."
+    )
 
 
 def resolve_by_sheet_name(param, workbook_names, cache):
@@ -1605,8 +1724,8 @@ def merge_file_hits(param, hits):
     if merged["objects_checked"] == 0:
         if merged["skipped_not_applicable"]:
             merged["status"] = "No Recommend Value"
-            merged["remark"] = merged["remark"] or (
-                "No cell matched the band/group conditions in Proposed/Recommended Value."
+            merged["remark"] = merged["remark"] or conditions_skip_remark(
+                param, merged["skipped_not_applicable"]
             )
             return primary_resolved, merged
         merged["status"] = "Not Found in Configuration"
@@ -1953,6 +2072,7 @@ def write_excel(params, summary, func_summary, run: RunContext):
         "Parameter ID",
         "Parameter Name",
         "Recommend Value",
+        "Conditions",
         "Applied Recommend (band/group)",
         "Status",
         "Input File(s)",
@@ -1993,6 +2113,7 @@ def write_excel(params, summary, func_summary, run: RunContext):
             p["pid"],
             p.get("param_name") or "",
             "" if p["recommend"] is None else p["recommend"],
+            p.get("conditions") or "",
             res.get("applied_recommend") or "",
             res["status"],
             res.get("input_files") or "",
@@ -2011,17 +2132,18 @@ def write_excel(params, summary, func_summary, run: RunContext):
             cell = ws2.cell(r, col, val)
             cell.border = thin
             cell.alignment = Alignment(wrap_text=True, vertical="top")
-            if col == 10:
+            if col == 11:
                 cell.fill = status_fill(res["status"])
         r += 1
     ws2.freeze_panes = "A4"
-    ws2.auto_filter.ref = f"A3:U{max(r-1, 3)}"
+    ws2.auto_filter.ref = f"A3:V{max(r-1, 3)}"
     autosize(ws2, 36)
     ws2.column_dimensions["F"].width = 42
     ws2.column_dimensions["G"].width = 36
     ws2.column_dimensions["I"].width = 36
-    ws2.column_dimensions["S"].width = 50
-    ws2.column_dimensions["T"].width = 45
+    ws2.column_dimensions["J"].width = 36
+    ws2.column_dimensions["T"].width = 50
+    ws2.column_dimensions["U"].width = 45
 
     # 3. Sheet wise
     ws3 = wb.create_sheet("3_Sheet_Wise_Report")
@@ -2419,6 +2541,7 @@ def write_parameter_csv(params, run: RunContext):
         "parameter_id",
         "parameter_name",
         "recommend_value",
+        "conditions",
         "applied_recommend",
         "status",
         "input_files",
@@ -2448,6 +2571,7 @@ def write_parameter_csv(params, run: RunContext):
                     "parameter_id": p["pid"],
                     "parameter_name": p.get("param_name") or "",
                     "recommend_value": "" if p["recommend"] is None else p["recommend"],
+                    "conditions": p.get("conditions") or "",
                     "applied_recommend": res.get("applied_recommend") or "",
                     "status": res["status"],
                     "input_files": res.get("input_files") or "",
