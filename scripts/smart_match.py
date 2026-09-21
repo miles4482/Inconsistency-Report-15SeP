@@ -157,6 +157,9 @@ GROUP_LINE_RE = re.compile(
 # "Interfreq handover group ID (INTERFREQHOGROUPID)=1". Excel wrap is collapsed.
 CONDITION_EQ_RE = re.compile(r"^\s*(.+?)\s*(?:=|==|:)\s*(.+?)\s*$")
 SHORT_IN_PARENS_RE = re.compile(r"^(.*?)\s*\(([^)]+)\)\s*$")
+CONDITION_HEADER_RE = re.compile(
+    r"^(CONDITION(?:S)?(?:COLUMN|COL)?|ROWCONDITION(?:S)?|FILTERCONDITION(?:S)?)(\d*)$"
+)
 
 
 def norm_key(value) -> str:
@@ -437,6 +440,24 @@ class ConditionClause:
         if self.short_name:
             out.append(self.short_name)
         return out
+
+
+def condition_header_slot(header) -> int | None:
+    """Conditions1 → 1, Conditions 2 → 2, Conditions / Condition Column → 1."""
+    key = norm_key(header)
+    if not key:
+        return None
+    match = CONDITION_HEADER_RE.fullmatch(key)
+    if not match:
+        return None
+    num = match.group(2)
+    return int(num) if num else 1
+
+
+def condition_header_is_numbered(header) -> bool:
+    key = norm_key(header)
+    match = CONDITION_HEADER_RE.fullmatch(key)
+    return bool(match and match.group(2))
 
 
 def parse_conditions(value) -> list[ConditionClause]:

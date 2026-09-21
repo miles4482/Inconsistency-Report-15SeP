@@ -151,16 +151,6 @@ REF_HEADER_ALIASES = {
         "GOLDENVALUE",
         "PLAN",
     },
-    "conditions": {
-        "CONDITIONS",
-        "CONDITION",
-        "CONDITIONCOLUMN",
-        "CONDITIONCOL",
-        "ROWCONDITION",
-        "ROWCONDITIONS",
-        "FILTERCONDITION",
-        "FILTERCONDITIONS",
-    },
 }
 
 # Microsoft Excel worksheet limits. This tool does not impose a lower cap.
@@ -960,7 +950,9 @@ def compare_param(param, resolved, cache, cell_index=None):
     counts = Counter()
     mismatches = []
     applied_notes = Counter()
-    cond_clauses = smart.parse_conditions(param.get("conditions"))
+    cond_clauses = []
+    for text in condition_texts(param):
+        cond_clauses.extend(smart.parse_conditions(text))
     need_ctx = spec.has_conditional
     indexes = sheet.get("identity_idx") if need_ctx else None
     bit_name = resolved.get("bit")
@@ -1158,12 +1150,6 @@ HEADER_PROBES = {
         "Golden Value",
         "Expected Value",
     ),
-    "conditions": (
-        "Conditions",
-        "Condition",
-        "Condition Column",
-        "ConditionColumn",
-    ),
 }
 SKIP_AS_RECOMMEND = {
     "DEFAULTVALUE",
@@ -1180,10 +1166,6 @@ SKIP_AS_RECOMMEND = {
     "UNITS",
     "DESCRIPTION",
     "RANGE",
-    "CONDITIONS",
-    "CONDITION",
-    "CONDITIONCOLUMN",
-    "CONDITIONCOL",
     "TARGETIMPACT",
     "TARGIMPACT",
     "IMPACT",
@@ -1191,12 +1173,12 @@ SKIP_AS_RECOMMEND = {
 
 
 def detect_ref_header_map(header_row) -> dict:
-    """Map identity columns plus adaptive recommend and Conditions columns.
+    """Map identity columns plus adaptive recommend and Conditions1..N columns.
 
     Identity (always expected): MML Object, Parameter ID, Parameter Name.
-    Recommend / Proposed / Plan and Conditions / Condition Column are found
-    adaptively from the remaining headers. Conditions is never treated as
-    the recommended value.
+    Recommend / Proposed / Plan is found adaptively. Conditions1, Conditions2,
+    … ConditionsN (or unnumbered Conditions) are detected by name and are
+    never treated as the recommended value.
     """
     mapping = {}
     used = set()
@@ -1206,6 +1188,8 @@ def detect_ref_header_map(header_row) -> dict:
         key = norm_key(cell)
         cells.append((i, text, key))
         if not key:
+            continue
+        if smart.condition_header_slot(text) is not None:
             continue
         for field, aliases in REF_HEADER_ALIASES.items():
             if key in aliases and field not in mapping:
@@ -1221,11 +1205,7 @@ def detect_ref_header_map(header_row) -> dict:
         for i, text in unused:
             if field == "recommend" and (
                 norm_key(text) in SKIP_AS_RECOMMEND
-                or norm_key(text) in REF_HEADER_ALIASES.get("conditions", ())
-            ):
-                continue
-            if field == "conditions" and norm_key(text) in SKIP_AS_RECOMMEND - set(
-                REF_HEADER_ALIASES.get("conditions", ())
+                or smart.condition_header_slot(text) is not None
             ):
                 continue
             for probe in probes:
@@ -1236,7 +1216,33 @@ def detect_ref_header_map(header_row) -> dict:
             mapping[field] = best_i
             used.add(best_i)
             unused = [(i, text) for i, text in unused if i != best_i]
+    mapping["condition_cols"] = collect_condition_columns(cells, used)
+    if 1 in mapping["condition_cols"]:
+        mapping["conditions"] = mapping["condition_cols"][1]
     return mapping
+
+
+def collect_condition_columns(cells, used: set) -> dict:
+    """Map Conditions1..N (and unnumbered Conditions) to column indexes."""
+    numbered = {}
+    unnumbered = []
+    for i, text, key in cells:
+        if i in used or not key:
+            continue
+        slot = smart.condition_header_slot(text)
+        if slot is None:
+            continue
+        if smart.condition_header_is_numbered(text):
+            if slot not in numbered:
+                numbered[slot] = i
+        else:
+            unnumbered.append((i, slot))
+    for i, slot in unnumbered:
+        if slot not in numbered:
+            numbered[slot] = i
+    for i in numbered.values():
+        used.add(i)
+    return numbered
 
 
 def is_identity_ref_header(mapping: dict) -> bool:
@@ -1289,7 +1295,7 @@ def load_reference_file(ref_path: Path, ref_count: int = 1):
                 + (3 if "pid" in candidate else 0)
                 + (3 if "param_name" in candidate else 0)
                 + (1 if "recommend" in candidate else 0)
-                + (1 if "conditions" in candidate else 0)
+                + (1 if candidate.get("condition_cols") else 0)
             )
             if score > best_score:
                 best_score = score
@@ -1330,6 +1336,12 @@ def load_reference_file(ref_path: Path, ref_count: int = 1):
                     "Parameter Name is empty. Add Parameter Name along with MML Object and Parameter ID."
                 )
             sheet_key = sheet_name if ref_count <= 1 else f"{ref_path.name} | {sheet_name}"
+            cond_cols = header_map.get("condition_cols") or {}
+            condition_values = {}
+            for n, idx in sorted(cond_cols.items()):
+                raw = row[idx] if row is not None and idx < len(row) else None
+                txt = clean_text(raw)
+                condition_values[int(n)] = txt or None
             params.append(
                 {
                     "ref_file": ref_path.name,
@@ -1342,7 +1354,9 @@ def load_reference_file(ref_path: Path, ref_count: int = 1):
                     "pid": pid,
                     "param_name": pname or None,
                     "recommend": rec if not is_empty(rec) else None,
-                    "conditions": clean_text(cell("conditions")) or None,
+                    "conditions": condition_values.get(1),
+                    "condition_values": condition_values,
+                    "condition_slots": sorted(cond_cols),
                     "no_recommend_reason": no_recommend_reason,
                     "network": guess_network_label(ref_path.name, sheet_name),
                     "sheet_is_mo": sheet_as_mo,
@@ -1429,13 +1443,48 @@ def row_matches_conditions(row, cond_cols) -> bool:
     return True
 
 
+def condition_texts(param) -> list[str]:
+    values = param.get("condition_values") or {}
+    texts = [values[n] for n in sorted(values) if not is_empty(values.get(n))]
+    if texts:
+        return texts
+    if param.get("conditions"):
+        return [param["conditions"]]
+    return []
+
+
+def condition_slots_for_report(params) -> list[int]:
+    slots = set()
+    for p in params or []:
+        slots.update(p.get("condition_slots") or [])
+        slots.update((p.get("condition_values") or {}).keys())
+        if p.get("conditions") and 1 not in slots:
+            slots.add(1)
+    return sorted(int(n) for n in slots if str(n).isdigit() or isinstance(n, int))
+
+
+def condition_value_for_slot(param, slot: int) -> str:
+    values = param.get("condition_values") or {}
+    if slot in values and values[slot] is not None:
+        return values[slot]
+    if int(slot) == 1:
+        return param.get("conditions") or ""
+    return ""
+
+
 def conditions_skip_remark(param, skipped: int) -> str:
-    cond_txt = clean_text(param.get("conditions"))
-    if cond_txt:
+    bits = []
+    values = param.get("condition_values") or {}
+    if values:
+        for n in sorted(values):
+            if not is_empty(values[n]):
+                bits.append(f"Conditions{n}={values[n]}")
+    elif param.get("conditions"):
+        bits.append(f"Conditions1={param['conditions']}")
+    if bits:
         return (
-            f"No cell matched Conditions ({cond_txt}); "
-            f"{skipped} row(s) skipped. Objects checked is the count of rows "
-            "where the group ID matches."
+            "No cell matched " + "; ".join(bits) + f"; {skipped} row(s) skipped. "
+            "Objects checked is the count of rows where every Conditions column matches."
         )
     return (
         "No cell matched the band/group conditions in Proposed/Recommended Value "
@@ -1961,100 +2010,6 @@ def write_excel(params, summary, func_summary, run: RunContext):
     )
     ws.merge_cells(start_row=note_row + 1, start_column=1, end_row=note_row + 2, end_column=10)
     ws.cell(note_row + 1, 1).alignment = Alignment(wrap_text=True, vertical="top")
-
-    func_title_row = note_row + 4
-    ws.cell(func_title_row, 1, "1.2 Function-wise Summary for individual sheet").font = section_font
-    func_headers = [
-        "Reference File / Sheet",
-        "Function",
-        "Total Parameters",
-        "Inconsistent (total)",
-        "Full Inconsistent",
-        "Mixed / Partial",
-        "Consistent",
-        "Not Found",
-        "No Recommend",
-        "Inconsistency Rate (auditable)",
-    ]
-    for col, title in enumerate(func_headers, start=1):
-        cell = ws.cell(func_title_row + 2, col, title)
-        cell.fill = header_fill
-        cell.font = header_font
-    r = func_title_row + 3
-    for sheet_name in keys:
-        functions = sorted(func_summary[sheet_name].keys())
-        for func in functions:
-            counter = func_summary[sheet_name][func]
-            values = [
-                sheet_name,
-                func,
-                counter["total"],
-                counter["inconsistent"],
-                counter["full_inconsistent"],
-                counter["mixed"],
-                counter["consistent"],
-                counter["not_found"],
-                counter["no_recommend"],
-                auditable_rate(counter),
-            ]
-            for col, val in enumerate(values, start=1):
-                cell = ws.cell(r, col, val)
-                cell.border = thin
-                if counter["inconsistent"]:
-                    ws.cell(r, 4).fill = PatternFill("solid", fgColor="FFC7CE")
-            r += 1
-
-    r += 2
-    ws.cell(r, 1, "1.3 Material inconsistencies (mismatch count >= 10 or 100% mismatch)").font = section_font
-    r += 1
-    mat_headers = [
-        "Reference File / Sheet",
-        "Function",
-        "Parameter ID",
-        "Recommend",
-        "Status",
-        "Objects",
-        "Mismatch Count",
-        "Mismatch %",
-        "Actual (top)",
-        "Remark",
-    ]
-    for col, title in enumerate(mat_headers, start=1):
-        cell = ws.cell(r, col, title)
-        cell.fill = header_fill
-        cell.font = header_font
-    r += 1
-    material = []
-    for p in params:
-        res = p["result"]
-        if not is_inconsistent(res["status"]):
-            continue
-        mismatch_pct = res["mismatch_count"] / res["objects_checked"] if res["objects_checked"] else 0
-        if res["status"] == "Inconsistent" or res["mismatch_count"] >= 10:
-            material.append((mismatch_pct, p))
-    material.sort(key=lambda x: (-x[0], -x[1]["result"]["mismatch_count"]))
-    for _, p in material:
-        res = p["result"]
-        mismatch_pct = res["mismatch_count"] / res["objects_checked"] if res["objects_checked"] else 0
-        values = [
-            p.get("sheet_key") or p["ref_sheet"],
-            p["function"],
-            p["pid"],
-            "" if p["recommend"] is None else p["recommend"],
-            res["status"],
-            res["objects_checked"],
-            res["mismatch_count"],
-            f"{mismatch_pct:.1%}",
-            unique_actual_text(res["unique_actuals"]),
-            res["remark"],
-        ]
-        for col, val in enumerate(values, start=1):
-            cell = ws.cell(r, col, val)
-            cell.border = thin
-            cell.alignment = Alignment(wrap_text=True, vertical="top")
-            if col == 5:
-                cell.fill = status_fill(res["status"])
-        r += 1
     autosize(ws)
     ws.row_dimensions[1].height = 22
     ws.freeze_panes = "A6"
@@ -2063,6 +2018,8 @@ def write_excel(params, summary, func_summary, run: RunContext):
     ws2 = wb.create_sheet("2_All_Parameter_Report")
     ws2["A1"] = "All Parameter-wise Report (function wise)"
     ws2["A1"].font = title_font
+    cond_slots = condition_slots_for_report(params)
+    cond_headers = [f"Conditions{n}" for n in cond_slots]
     param_headers = [
         "Reference File",
         "Reference Sheet",
@@ -2072,7 +2029,7 @@ def write_excel(params, summary, func_summary, run: RunContext):
         "Parameter ID",
         "Parameter Name",
         "Recommend Value",
-        "Conditions",
+        *cond_headers,
         "Applied Recommend (band/group)",
         "Status",
         "Input File(s)",
@@ -2087,6 +2044,7 @@ def write_excel(params, summary, func_summary, run: RunContext):
         "Sample Mismatched Objects",
         "Remark",
     ]
+    status_col = 8 + len(cond_slots) + 2
     for col, title in enumerate(param_headers, start=1):
         cell = ws2.cell(3, col, title)
         cell.fill = header_fill
@@ -2113,7 +2071,7 @@ def write_excel(params, summary, func_summary, run: RunContext):
             p["pid"],
             p.get("param_name") or "",
             "" if p["recommend"] is None else p["recommend"],
-            p.get("conditions") or "",
+            *[condition_value_for_slot(p, n) or "" for n in cond_slots],
             res.get("applied_recommend") or "",
             res["status"],
             res.get("input_files") or "",
@@ -2132,18 +2090,21 @@ def write_excel(params, summary, func_summary, run: RunContext):
             cell = ws2.cell(r, col, val)
             cell.border = thin
             cell.alignment = Alignment(wrap_text=True, vertical="top")
-            if col == 11:
+            if col == status_col:
                 cell.fill = status_fill(res["status"])
         r += 1
+    last_col = get_column_letter(len(param_headers))
     ws2.freeze_panes = "A4"
-    ws2.auto_filter.ref = f"A3:V{max(r-1, 3)}"
+    ws2.auto_filter.ref = f"A3:{last_col}{max(r-1, 3)}"
     autosize(ws2, 36)
     ws2.column_dimensions["F"].width = 42
     ws2.column_dimensions["G"].width = 36
-    ws2.column_dimensions["I"].width = 36
-    ws2.column_dimensions["J"].width = 36
-    ws2.column_dimensions["T"].width = 50
-    ws2.column_dimensions["U"].width = 45
+    cond_last = 8 + len(cond_slots)
+    if cond_slots:
+        for idx in range(9, cond_last + 1):
+            ws2.column_dimensions[get_column_letter(idx)].width = 36
+    applied_col = get_column_letter(cond_last + 1)
+    ws2.column_dimensions[applied_col].width = 36
 
     # 3. Sheet wise
     ws3 = wb.create_sheet("3_Sheet_Wise_Report")
@@ -2405,46 +2366,6 @@ def write_markdown(params, summary, func_summary, extras, run: RunContext):
         f"{all_c['not_found']} could not be located in the configuration dumps."
     )
     lines.append("")
-    lines.append("### 1.2 Function-wise Summary for individual sheet")
-    lines.append("")
-    for sheet_name in keys:
-        lines.append(f"#### {sheet_name}")
-        lines.append("")
-        lines.append("| Function | Total | Inconsistent | Full | Mixed | Consistent | Not Found | No Recommend | Rate |")
-        lines.append("|---|---:|---:|---:|---:|---:|---:|---:|---|")
-        for func in sorted(func_summary[sheet_name].keys()):
-            c = func_summary[sheet_name][func]
-            lines.append(
-                f"| {func} | {c['total']} | {c['inconsistent']} | {c['full_inconsistent']} | {c['mixed']} | "
-                f"{c['consistent']} | {c['not_found']} | {c['no_recommend']} | {rate(c)} |"
-            )
-        lines.append("")
-
-    lines.append("### 1.3 Material inconsistencies")
-    lines.append("")
-    lines.append("Parameters with 100% mismatch, or at least 10 mismatched objects:")
-    lines.append("")
-    lines.append("| Sheet | Function | Parameter ID | Recommend | Status | Mismatch | Mismatch % | Actual (top) |")
-    lines.append("|---|---|---|---|---|---:|---|---|")
-    material = []
-    for p in params:
-        res = p["result"]
-        if not is_inconsistent(res["status"]):
-            continue
-        mismatch_pct = res["mismatch_count"] / res["objects_checked"] if res["objects_checked"] else 0
-        if res["status"] == "Inconsistent" or res["mismatch_count"] >= 10:
-            material.append((mismatch_pct, p))
-    material.sort(key=lambda x: (-x[0], -x[1]["result"]["mismatch_count"]))
-    for _, p in material:
-        res = p["result"]
-        mismatch_pct = res["mismatch_count"] / res["objects_checked"] if res["objects_checked"] else 0
-        rec = "" if p["recommend"] is None else str(p["recommend"])
-        actual = unique_actual_text(res["unique_actuals"]).replace("|", "/")
-        lines.append(
-            f"| {p.get('sheet_key') or p['ref_sheet']} | {p['function']} | `{p['pid']}` | {rec} | {res['status']} | "
-            f"{res['mismatch_count']}/{res['objects_checked']} | {mismatch_pct:.1%} | {actual} |"
-        )
-    lines.append("")
 
     lines.append("## 2. All Parameter-wise Report (function wise)")
     lines.append("")
@@ -2531,6 +2452,8 @@ def write_markdown(params, summary, func_summary, extras, run: RunContext):
 
 
 def write_parameter_csv(params, run: RunContext):
+    cond_slots = condition_slots_for_report(params)
+    cond_fields = [f"conditions{n}" for n in cond_slots]
     fieldnames = [
         "run_id",
         "reference_file",
@@ -2541,7 +2464,7 @@ def write_parameter_csv(params, run: RunContext):
         "parameter_id",
         "parameter_name",
         "recommend_value",
-        "conditions",
+        *cond_fields,
         "applied_recommend",
         "status",
         "input_files",
@@ -2560,31 +2483,31 @@ def write_parameter_csv(params, run: RunContext):
         for p in params:
             res = p["result"]
             resolved = p["resolved"]
-            writer.writerow(
-                {
-                    "run_id": run.run_id,
-                    "reference_file": p.get("ref_file") or run.reference.name,
-                    "reference_sheet": p["ref_sheet"],
-                    "network": p.get("network") or "",
-                    "function": p["function"],
-                    "mml_object": p["mml"],
-                    "parameter_id": p["pid"],
-                    "parameter_name": p.get("param_name") or "",
-                    "recommend_value": "" if p["recommend"] is None else p["recommend"],
-                    "conditions": p.get("conditions") or "",
-                    "applied_recommend": res.get("applied_recommend") or "",
-                    "status": res["status"],
-                    "input_files": res.get("input_files") or "",
-                    "config_sheet": resolved.get("sheet") or "",
-                    "config_column": resolved.get("column") or "",
-                    "bit_name": resolved.get("bit") or "",
-                    "objects_checked": res["objects_checked"],
-                    "match_count": res["match_count"],
-                    "mismatch_count": res["mismatch_count"],
-                    "actual_top": unique_actual_text(res["unique_actuals"]),
-                    "remark": res["remark"],
-                }
-            )
+            row = {
+                "run_id": run.run_id,
+                "reference_file": p.get("ref_file") or run.reference.name,
+                "reference_sheet": p["ref_sheet"],
+                "network": p.get("network") or "",
+                "function": p["function"],
+                "mml_object": p["mml"],
+                "parameter_id": p["pid"],
+                "parameter_name": p.get("param_name") or "",
+                "recommend_value": "" if p["recommend"] is None else p["recommend"],
+                "applied_recommend": res.get("applied_recommend") or "",
+                "status": res["status"],
+                "input_files": res.get("input_files") or "",
+                "config_sheet": resolved.get("sheet") or "",
+                "config_column": resolved.get("column") or "",
+                "bit_name": resolved.get("bit") or "",
+                "objects_checked": res["objects_checked"],
+                "match_count": res["match_count"],
+                "mismatch_count": res["mismatch_count"],
+                "actual_top": unique_actual_text(res["unique_actuals"]),
+                "remark": res["remark"],
+            }
+            for n in cond_slots:
+                row[f"conditions{n}"] = condition_value_for_slot(p, n) or ""
+            writer.writerow(row)
 
 
 def rate_text(counter) -> str:

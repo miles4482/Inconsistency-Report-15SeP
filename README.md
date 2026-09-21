@@ -30,7 +30,7 @@ python3 scripts/license_generator_app.py
 
 ## Windows app
 
-Download [`packages/ParameterAudit_Windows_v1.9.0.rar`](packages/ParameterAudit_Windows_v1.9.0.rar) (also [`ParameterAudit_Windows.rar`](packages/ParameterAudit_Windows.rar)), extract the folder, then run `ParameterAudit.exe`. The window title shows **v1.9.0**.
+Download [`packages/ParameterAudit_Windows_v1.10.0.rar`](packages/ParameterAudit_Windows_v1.10.0.rar) (also [`ParameterAudit_Windows.rar`](packages/ParameterAudit_Windows.rar)), extract the folder, then run `ParameterAudit.exe`. The window title shows **v1.10.0**.
 
 The extracted folder already contains `Input`, `Reference`, and `Output`. Drop files in, then Generate Report — or Browse this PC to other folders.
 
@@ -72,7 +72,7 @@ Latest copies:
 - `Parameter Name` is the dump display name and is matched first.
 - 4G `Cell` maps `Local cell ID` to band families (L9 = L09 = L900 = Frequency Band 8; L18 = L1800 = Band 3; L21 = L2100 = Band 1; L26 = L2600 = Band 41/7). 5G `NRDUCELL` maps `NR DU Cell ID` (N41 → L26). Only those two sheets are read for the band map.
 - Proposed values such as `L9:-74 L18:-118 L21:-118 L26:-115` are applied only to cells where that band applies.
-- **Conditions** (or Condition Column) on the Mobility sheet filters dump rows when one cell exists more than once, for example Interfreq handover group ID 0=Data, 1=VoLTE, 2+. Write the dump Parameter Name and short name in brackets: `Interfreq handover group ID (INTERFREQHOGROUPID)=0`. The inconsistency report and Objects Checked / SUM count only rows where that ID matches. Empty Conditions audits every row.
+- **Conditions1 / Conditions2 / … ConditionsN** on the Mobility sheet filter dump rows when one cell exists more than once, for example Interfreq handover group ID 0=Data, 1=VoLTE, 2+. Write the dump Parameter Name and short name in brackets: `Interfreq handover group ID (INTERFREQHOGROUPID)=0`. Every filled Conditions column must match. The All Parameter report adds one column per ConditionsN found in the reference. Objects Checked / SUM counts only matching rows. Empty Conditions columns are ignored.
 - Built-in name thinking (aliases + fuzzy match) corrects mistyped MO / parameter / sheet names. No cloud AI is used.
 - Other workbooks are matched by sheet name and column name.
 - Every reference parameter is searched in **every selected** input file.

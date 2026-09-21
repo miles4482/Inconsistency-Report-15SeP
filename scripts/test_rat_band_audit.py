@@ -165,13 +165,29 @@ def test_three_identity_columns():
         "Parameter Name",
         "Default Value",
         "Proposed Value",
-        "Conditions",
+        "Conditions1",
         "Targ. t/Impact",
     ]
     mapping3 = audit.detect_ref_header_map(mobility)
     assert mapping3["recommend"] == 4
+    assert mapping3["condition_cols"][1] == 5
     assert mapping3["conditions"] == 5
     assert mapping3["recommend"] != mapping3["conditions"]
+
+    numbered = [
+        "MO Name",
+        "Parameter ID",
+        "Parameter Name",
+        "Proposed Value",
+        "Conditions1",
+        "Conditions2",
+        "Conditions3",
+        "Targ. t/Impact",
+    ]
+    mapping4 = audit.detect_ref_header_map(numbered)
+    assert mapping4["recommend"] == 3
+    assert mapping4["condition_cols"] == {1: 4, 2: 5, 3: 6}
+    assert mapping4["conditions"] == 4
 
 
 def test_fuzzy_names():
@@ -448,17 +464,18 @@ def test_conditions_group_id_filter():
         "*Interfreq handover group ID",
         "AAAS Based Interfreq A1 RSRP Threshold(dBm)",
         "Load Based Interfreq RSRP threshold",
+        "Service Flag",
     ]
     # One Local cell ID exists twice: group 0 = Data, group 1 = VoLTE
     rows = [
-        ["TNMdp05", 11, 0, -74, -103],
-        ["TNMdp05", 11, 1, -90, -105],
-        ["TNMdp05", 14, 0.0, -118, -103],
-        ["TNMdp05", 14, 1, -90, -105],
-        ["TNMdp05", 20, 0, -118, -103],
-        ["TNMdp05", 20, 1, -90, -105],
-        ["TNMdp05", 74, 0, -115, -103],
-        ["TNMdp05", 74, 1, -90, -105],
+        ["TNMdp05", 11, 0, -74, -103, 1],
+        ["TNMdp05", 11, 1, -90, -105, 1],
+        ["TNMdp05", 14, 0.0, -118, -103, 0],
+        ["TNMdp05", 14, 1, -90, -105, 1],
+        ["TNMdp05", 20, 0, -118, -103, 1],
+        ["TNMdp05", 20, 1, -90, -105, 0],
+        ["TNMdp05", 74, 0, -115, -103, 1],
+        ["TNMdp05", 74, 1, -90, -105, 1],
     ]
     header_norm = {smart.norm_key(h): i for i, h in enumerate(headers)}
     sheet = {
@@ -553,6 +570,26 @@ def test_conditions_group_id_filter():
     assert miss_out["objects_checked"] == 0
     assert miss_out["status"] == "No Recommend Value"
     assert "Conditions" in (miss_out["remark"] or "")
+
+    both = dict(
+        a1,
+        conditions=None,
+        condition_values={
+            1: "Interfreq handover group ID=0",
+            2: "Service Flag=1",
+        },
+        condition_slots=[1, 2],
+    )
+    both_out = audit.compare_param(both, dict(resolved), FakeCache(), cell_index=index)
+    # group 0 rows: 11 flag1, 14 flag0 skip, 20 flag1, 74 flag1 → 3
+    assert both_out["objects_checked"] == 3
+    assert both_out["match_count"] == 3
+    assert both_out["status"] == "Consistent"
+
+    assert audit.condition_slots_for_report([both]) == [1, 2]
+    assert smart.condition_header_slot("Conditions1") == 1
+    assert smart.condition_header_slot("Conditions 3") == 3
+    assert smart.condition_header_slot("Condition Column") == 1
 
 
 def test_list_workbooks_rats():
@@ -739,7 +776,7 @@ def _build_reference(path: Path):
                 "Parameter Name",
                 "Default Value",
                 "Proposed Value",
-                "Conditions",
+                "Conditions1",
                 "Targ. t/Impact",
             ],
             [
@@ -873,7 +910,7 @@ def test_end_to_end_audit():
         )
         assert int(cond0["objects_checked"]) == 4
         assert cond0["status"] == "Consistent"
-        assert "Interfreq handover group ID=0" in (cond0.get("conditions") or "")
+        assert "Interfreq handover group ID=0" in (cond0.get("conditions1") or "")
 
         cond_a3 = next(
             p
@@ -884,6 +921,18 @@ def test_end_to_end_audit():
         # group-1 L21 cell 20 is -100 vs -108; other group-1 cells match
         assert int(cond_a3["mismatch_count"]) >= 1
         assert int(cond_a3["match_count"]) >= 1
+
+        from openpyxl import load_workbook as _load_wb
+
+        overall = _load_wb(run.out_xlsx)["1_Overall_Report"]
+        overall_text = " ".join(str(c.value or "") for row in overall.iter_rows(max_row=80) for c in row)
+        assert "1.1 Overall Summary" in overall_text
+        assert "1.2 Function-wise Summary" not in overall_text
+        assert "1.3 Material inconsistencies" not in overall_text
+        all_param = _load_wb(run.out_xlsx)["2_All_Parameter_Report"]
+        all_headers = [c.value for c in all_param[3]]
+        assert "Conditions1" in all_headers
+        assert "Conditions2" not in all_headers
 
         legacy = next(p for p in params if p["reference_sheet"] == "Legacy")
         assert legacy["status"] in {"Mixed / Partial", "Inconsistent", "Consistent"}
