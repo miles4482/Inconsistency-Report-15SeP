@@ -3,10 +3,15 @@ __pycache__/
 *.pyc
 reports/runs/
 reports/latest/
+input/**/*.xlsb
+input/**/*.xlsx
+input/**/*.xlsm
 input/*.xlsb
 input/*.xlsx
 input/*.xlsm
 !input/README.md
+!input/**/README.md
+!input/**/README.txt
 reference/*.xlsb
 reference/*.xlsx
 reference/*.xlsm

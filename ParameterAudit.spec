@@ -2,7 +2,7 @@
 from PyInstaller.utils.hooks import collect_submodules
 
 hidden = collect_submodules("openpyxl") + collect_submodules("pyxlsb")
-hidden += ["compare_reference_parameters", "license_control", "tkinter", "tkinter.filedialog", "tkinter.messagebox", "tkinter.ttk"]
+hidden += ["compare_reference_parameters", "smart_match", "license_control", "app_version", "tkinter", "tkinter.filedialog", "tkinter.messagebox", "tkinter.ttk"]
 hidden += collect_submodules("cryptography")
 
 a = Analysis(
@@ -11,6 +11,7 @@ a = Analysis(
     binaries=[],
     datas=[
         ("How_to_use.txt", "."),
+        ("VERSION.txt", "."),
         ("app_folders/Input", "Input"),
         ("app_folders/Reference", "Reference"),
         ("app_folders/Output", "Output"),
